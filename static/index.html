@@ -1,0 +1,962 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0e14'/%3E%3Crect x='6' y='17' width='4.5' height='9' rx='1.4' fill='%234d9fff'/%3E%3Crect x='13.7' y='11' width='4.5' height='15' rx='1.4' fill='%2334d399'/%3E%3Crect x='21.4' y='6' width='4.5' height='20' rx='1.4' fill='%23f5b74d'/%3E%3C/svg%3E">
+<title>WorkBuddy Token 看板</title>
+<script>try{if(localStorage.getItem('wbdash-theme')==='light')document.documentElement.classList.add('light');}catch(e){}</script>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #121826;
+    --panel-2: #161d2e;
+    --border: #1f293d;
+    --text: #e6edf3;
+    --text-2: #93a1b5;
+    --text-3: #5d6b80;
+    --accent: #4d9fff;
+    --green: #34d399;
+    --amber: #f5b74d;
+    --purple: #a78bfa;
+    --red: #f87171;
+    --seg-active-bg: #24304a;
+    --hover: rgba(77,159,255,.04);
+    --line: rgba(31,41,61,.6);
+    --radius: 10px;
+    color-scheme: dark;
+  }
+  html.light {
+    --bg: #f5f7fa;
+    --panel: #ffffff;
+    --panel-2: #eef2f7;
+    --border: #dde4ee;
+    --text: #1a2233;
+    --text-2: #4b5b73;
+    --text-3: #8a96a8;
+    --accent: #2563eb;
+    --green: #0d9668;
+    --amber: #b45309;
+    --purple: #7c3aed;
+    --red: #dc2626;
+    --seg-active-bg: #dbe7fd;
+    --hover: rgba(37,99,235,.055);
+    --line: rgba(221,228,238,.8);
+    color-scheme: light;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1440px; margin: 0 auto; padding: 14px 18px 40px; }
+
+  /* ---------- 顶栏 ---------- */
+  header {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 6px 0 14px;
+  }
+  header h1 { font-size: 17px; font-weight: 600; letter-spacing: .2px; }
+  header h1 span { color: var(--accent); }
+  .live {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12px; color: var(--text-2);
+    background: var(--panel); border: 1px solid var(--border);
+    padding: 4px 11px; border-radius: 999px;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+  .live.on .dot { animation: pulse 2s infinite; }
+  .live.off .dot { background: var(--text-3); animation: none; }
+  .live.err .dot { background: var(--red); }
+  .live.err { color: var(--red); border-color: rgba(248,113,113,.4); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+  .spacer { flex: 1; }
+  .src-hint { font-size: 11px; color: var(--text-3); }
+  .theme-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0;
+    background: var(--panel); border: 1px solid var(--border);
+    color: var(--text-2); cursor: pointer;
+    transition: color .15s, border-color .15s;
+  }
+  .theme-btn:hover { color: var(--text); border-color: var(--text-3); }
+  .theme-btn svg { width: 15px; height: 15px; display: block; }
+
+  /* ---------- 控制栏 ---------- */
+  .controls {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 10px 14px; margin-bottom: 14px;
+  }
+  .seg { display: inline-flex; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 2px; }
+  .seg button {
+    border: 0; background: transparent; color: var(--text-2);
+    font-size: 12px; padding: 5px 12px; border-radius: 6px; cursor: pointer;
+    font-family: inherit; transition: all .15s; white-space: nowrap;
+  }
+  .seg button:hover { color: var(--text); }
+  .seg button.active { background: var(--accent); color: #fff; font-weight: 500; }
+  .ctrl-label { font-size: 12px; color: var(--text-3); margin-left: 4px; }
+  .custom-range { display: none; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .custom-range.show { display: inline-flex; }
+  input[type="datetime-local"] {
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 7px; padding: 5px 8px; font-size: 12px; font-family: inherit;
+  }
+  .btn-apply {
+    background: var(--accent); color: #fff; border: 0; border-radius: 7px;
+    padding: 6px 14px; font-size: 12px; cursor: pointer; font-family: inherit;
+  }
+  .btn-apply:hover { filter: brightness(1.1); }
+  .hint-inline { font-size: 11px; color: var(--text-3); }
+
+  /* ---------- KPI ---------- */
+  .kpis { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin-bottom: 14px; }
+  .kpi {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 13px 15px 11px;
+    min-width: 0; position: relative; overflow: hidden;
+  }
+  .kpi .label { font-size: 11px; color: var(--text-3); letter-spacing: .4px; margin-bottom: 5px; }
+  .kpi .value { font-size: 21px; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -.3px; white-space: nowrap; }
+  .kpi .sub { font-size: 11px; color: var(--text-3); margin-top: 4px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .kpi .sub b { color: var(--text-2); font-weight: 500; }
+  .c-blue .value { color: var(--accent); }
+  .c-green .value { color: var(--green); }
+  .c-amber .value { color: var(--amber); }
+  .c-purple .value { color: var(--purple); }
+
+  /* ---------- 图表 ---------- */
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+  .grid2 .span2 { grid-column: 1 / -1; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 14px 16px 10px; min-width: 0;
+  }
+  .card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .card-head h2 { font-size: 13px; font-weight: 600; color: var(--text); }
+  .card-head .sub { font-size: 11px; color: var(--text-3); }
+  .mini-seg { display: inline-flex; background: var(--panel-2); border: 1px solid var(--border); border-radius: 7px; padding: 2px; margin-left: auto; }
+  .mini-seg button {
+    border: 0; background: transparent; color: var(--text-3); font-size: 11px;
+    padding: 3px 9px; border-radius: 5px; cursor: pointer; font-family: inherit;
+  }
+  .mini-seg button.active { background: var(--seg-active-bg); color: var(--text); }
+  .chart { width: 100%; height: 300px; }
+  .chart.tall { height: 320px; }
+
+  /* ---------- 表格 ---------- */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th {
+    text-align: left; font-weight: 500; color: var(--text-3); font-size: 11px;
+    padding: 7px 10px; border-bottom: 1px solid var(--border); white-space: nowrap;
+  }
+  td { padding: 8px 10px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+  tr:hover td { background: var(--hover); }
+  td.num, th.num { text-align: right; }
+  .m-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; vertical-align: 1px; }
+  .rate-pill {
+    display: inline-block; padding: 1px 7px; border-radius: 99px; font-size: 11px;
+    background: rgba(52,211,153,.12); color: var(--green);
+  }
+
+  /* ---------- 最近请求 ---------- */
+  .req-list { max-height: 330px; overflow-y: auto; }
+  .req {
+    display: flex; align-items: baseline; gap: 10px;
+    padding: 7px 4px; border-bottom: 1px solid var(--line);
+  }
+  .req:last-child { border-bottom: 0; }
+  .req .time { color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums; flex-shrink: 0; width: 86px; }
+  .req .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); font-size: 12px; }
+  .req .cr { color: var(--amber); font-variant-numeric: tabular-nums; font-size: 12px; flex-shrink: 0; }
+  .tag {
+    font-size: 10px; padding: 1px 6px; border-radius: 99px; flex-shrink: 0;
+    background: rgba(52,211,153,.1); color: var(--green);
+  }
+  .tag.approx { background: rgba(147,161,181,.12); color: var(--text-3); }
+
+  /* ---------- 数据说明 ---------- */
+  .note { font-size: 11.5px; color: var(--text-3); line-height: 1.9; }
+  .note b { color: var(--text-2); font-weight: 500; }
+  .note code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 10.5px; color: var(--text-2); }
+
+  footer { margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-3); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+
+  .empty-overlay {
+    position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    color: var(--text-3); font-size: 12px; background: rgba(18,24,38,.6); border-radius: var(--radius);
+  }
+  .card { position: relative; }
+  .card.empty .empty-overlay { display: flex; }
+
+  /* ---------- 响应式 ---------- */
+  @media (max-width: 1180px) {
+    .kpis { grid-template-columns: repeat(3, 1fr); }
+  }
+  @media (max-width: 980px) {
+    .grid2 { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 640px) {
+    .wrap { padding: 10px 10px 30px; }
+    .kpis { grid-template-columns: repeat(2, 1fr); }
+    .kpi .value { font-size: 18px; }
+    .seg button { padding: 5px 9px; }
+    .req .time { width: 74px; }
+    header h1 { font-size: 15px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>WorkBuddy <span>Token</span> 看板</h1>
+    <div class="live on" id="live">
+      <span class="dot"></span>
+      <span id="live-text">实时 · 5s</span>
+    </div>
+    <div class="spacer"></div>
+    <div class="src-hint" id="src-hint">数据源加载中…</div>
+    <button class="theme-btn" id="theme-btn" title="切换深色 / 浅色主题"></button>
+  </header>
+
+  <div class="controls">
+    <div class="seg" id="range-seg">
+      <button data-range="today" class="active">当日</button>
+      <button data-range="7d">近 7 天</button>
+      <button data-range="30d">近 30 天</button>
+      <button data-range="month">本月</button>
+      <button data-range="all">全部</button>
+      <button data-range="custom">自定义</button>
+    </div>
+    <div class="custom-range" id="custom-range">
+      <input type="datetime-local" id="dt-start">
+      <span class="hint-inline">至</span>
+      <input type="datetime-local" id="dt-end">
+      <button class="btn-apply" id="btn-apply">应用</button>
+    </div>
+    <div class="spacer"></div>
+    <span class="ctrl-label">刷新</span>
+    <div class="seg" id="refresh-seg">
+      <button data-int="1000">1s</button>
+      <button data-int="3000">3s</button>
+      <button data-int="5000" class="active">5s</button>
+      <button data-int="10000">10s</button>
+      <button data-int="0">暂停</button>
+    </div>
+  </div>
+
+  <div class="kpis">
+    <div class="kpi c-blue">
+      <div class="label">总 TOKEN</div>
+      <div class="value" id="k-total">—</div>
+      <div class="sub" id="k-total-sub">&nbsp;</div>
+    </div>
+    <div class="kpi">
+      <div class="label">新输入（未缓存）</div>
+      <div class="value" id="k-fresh">—</div>
+      <div class="sub" id="k-fresh-sub">&nbsp;</div>
+    </div>
+    <div class="kpi c-green">
+      <div class="label">缓存命中率</div>
+      <div class="value" id="k-rate">—</div>
+      <div class="sub" id="k-rate-sub">&nbsp;</div>
+    </div>
+    <div class="kpi">
+      <div class="label">输出 TOKEN</div>
+      <div class="value" id="k-out">—</div>
+      <div class="sub" id="k-out-sub">&nbsp;</div>
+    </div>
+    <div class="kpi c-amber">
+      <div class="label">积分消耗</div>
+      <div class="value" id="k-credit">—</div>
+      <div class="sub" id="k-credit-sub">&nbsp;</div>
+    </div>
+    <div class="kpi c-purple">
+      <div class="label">模型调用</div>
+      <div class="value" id="k-calls">—</div>
+      <div class="sub" id="k-calls-sub">&nbsp;</div>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card" id="card-trend">
+      <div class="card-head">
+        <h2>模型用量趋势</h2>
+        <span class="sub" id="trend-sub"></span>
+        <div class="mini-seg" id="metric-seg">
+          <button data-metric="total" class="active">总量</button>
+          <button data-metric="fresh">新输入</button>
+          <button data-metric="cached">缓存</button>
+          <button data-metric="completion">输出</button>
+        </div>
+      </div>
+      <div class="chart tall" id="ch-trend"></div>
+      <div class="empty-overlay">该时间段暂无数据</div>
+    </div>
+    <div class="card" id="card-pie">
+      <div class="card-head">
+        <h2>模型占比</h2>
+        <span class="sub">按总 token</span>
+      </div>
+      <div class="chart tall" id="ch-pie"></div>
+      <div class="empty-overlay">该时间段暂无数据</div>
+    </div>
+    <div class="card" id="card-rate">
+      <div class="card-head">
+        <h2>缓存命中率趋势</h2>
+        <span class="sub">缓存读取 ÷ 输入总量</span>
+      </div>
+      <div class="chart" id="ch-rate"></div>
+      <div class="empty-overlay">该时间段暂无数据</div>
+    </div>
+    <div class="card" id="card-credit">
+      <div class="card-head">
+        <h2>积分消耗</h2>
+        <span class="sub">按模型堆叠</span>
+      </div>
+      <div class="chart" id="ch-credit"></div>
+      <div class="empty-overlay">该时间段暂无积分记录</div>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card span2">
+      <div class="card-head"><h2>模型明细</h2><span class="sub" id="table-sub"></span></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>模型</th>
+              <th class="num">调用</th>
+              <th class="num">新输入</th>
+              <th class="num">缓存读取</th>
+              <th class="num">输出</th>
+              <th class="num">总计</th>
+              <th class="num">命中率</th>
+              <th class="num">积分</th>
+              <th class="num">等价 API</th>
+            </tr>
+          </thead>
+          <tbody id="tbody-models"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card span2">
+      <div class="card-head"><h2>最近请求</h2><span class="sub">按完成时间 · 含积分</span></div>
+      <div class="req-list" id="req-list"></div>
+    </div>
+  </div>
+
+  <footer>
+    <span>WorkBuddy Token 看板 · 本地运行 · 数据仅来自本机 <code>~/.workbuddy</code></span>
+    <span id="foot-scan"></span>
+  </footer>
+</div>
+
+<script src="/static/echarts.min.js"></script>
+<script>
+'use strict';
+/* ================= 基础 ================= */
+const $ = id => document.getElementById(id);
+const MODEL_COLORS = {
+  'deepseek-v4.1-flash': '#4d9fff',
+  'custom-local:deepseek-flash': '#8b7cf6',
+  'kimi-k3-1': '#f7a83c',
+  'kimi-k2.8-preview': '#ff7a59',
+  'glm-5.3-flash': '#34d399',
+  'glm-5.2': '#a3e635',
+  'hy4-preview': '#22d3ee',
+  'hy3': '#5eead4',
+  'minimax-m3': '#e879f9',
+  'space-bunny': '#a78bfa',
+  '未归属': '#5d6b80',
+};
+const FALLBACK_COLORS = ['#60a5fa','#f472b6','#facc15','#4ade80','#c084fc','#fb923c','#38bdf8','#eab308'];
+let fallbackIdx = 0;
+const modelColorMap = {};
+function modelColor(m) {
+  if (MODEL_COLORS[m]) return MODEL_COLORS[m];
+  if (!modelColorMap[m]) { modelColorMap[m] = FALLBACK_COLORS[fallbackIdx++ % FALLBACK_COLORS.length]; }
+  return modelColorMap[m];
+}
+
+function fmtNum(n) {
+  n = n || 0;
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(Math.round(n));
+}
+function fmtInt(n) { return (n || 0).toLocaleString('en-US'); }
+function fmtPct(x) { return (x * 100).toFixed(1) + '%'; }
+function fmtCNY(v) {
+  if (v == null) return '—';
+  if (v >= 1000) return '¥' + v.toFixed(1);
+  if (v >= 1) return '¥' + v.toFixed(2);
+  if (v >= 0.01) return '¥' + v.toFixed(3);
+  if (v > 0) return '¥' + v.toFixed(4);
+  return '¥0';
+}
+const pad2 = n => String(n).padStart(2, '0');
+function fmtClock(ms) {
+  const d = new Date(ms);
+  return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+}
+function fmtDT(ms) {
+  const d = new Date(ms);
+  return `${d.getMonth()+1}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+function axisLabel(ms, unit) {
+  const d = new Date(ms);
+  if (unit === 'month') return `${d.getFullYear()}/${d.getMonth()+1}`;
+  if (unit === 'week' || unit === 'day') return `${d.getMonth()+1}/${d.getDate()}`;
+  if (unit === '5min') return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  return `${pad2(d.getHours())}:00`;
+}
+
+/* ================= 状态 ================= */
+const state = {
+  range: 'today',
+  custom: { start: null, end: null },
+  interval: 5000,
+  metric: 'total',
+  lastData: null,
+  bucketCount: -1,
+  timer: null,
+  failCount: 0,
+  theme: 'dark',
+};
+
+/* ================= 主题 ================= */
+const THEME_KEY = 'wbdash-theme';
+const ICON_SUN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.6v2.1M12 19.3v2.1M2.6 12h2.1M19.3 12h2.1M5.3 5.3l1.5 1.5M17.2 17.2l1.5 1.5M18.7 5.3l-1.5 1.5M6.8 17.2l-1.5 1.5"/></svg>';
+const ICON_MOON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.4 13.2A8.4 8.4 0 1 1 10.8 3.6a6.8 6.8 0 0 0 9.6 9.6z"/></svg>';
+
+function updateThemeBtn() {
+  // 按钮显示「将切换到的目标主题」图标
+  $('theme-btn').innerHTML = state.theme === 'light' ? ICON_MOON : ICON_SUN;
+  $('theme-btn').title = state.theme === 'light' ? '切换为深色主题' : '切换为浅色主题';
+}
+
+function setTheme(t) {
+  state.theme = t;
+  document.documentElement.classList.toggle('light', t === 'light');
+  try { localStorage.setItem(THEME_KEY, t); } catch (e) {}
+  updateThemeBtn();
+  // 图表配色跟随主题：清空数据指纹强制重绘
+  for (const k of Object.keys(charts)) { if (charts[k]) charts[k].__sig = null; }
+  if (state.lastData) render(state.lastData);
+}
+
+/* ================= 图表实例 ================= */
+const charts = {};
+function initCharts() {
+  charts.trend = echarts.init($('ch-trend'), null, { renderer: 'canvas' });
+  charts.pie = echarts.init($('ch-pie'), null, { renderer: 'canvas' });
+  charts.rate = echarts.init($('ch-rate'), null, { renderer: 'canvas' });
+  charts.credit = echarts.init($('ch-credit'), null, { renderer: 'canvas' });
+}
+function themeColors() {
+  const light = document.documentElement.classList.contains('light');
+  return {
+    axis: light ? '#cfd8e3' : '#2a3752',
+    label: light ? '#5b6b82' : '#93a1b5',
+    split: light ? 'rgba(203,213,225,.75)' : 'rgba(42,55,82,.55)',
+    stroke: light ? 'rgba(148,163,184,.55)' : 'rgba(42,55,82,.9)',
+    ttBg: light ? 'rgba(255,255,255,.985)' : 'rgba(15,20,32,.96)',
+    ttBorder: light ? '#d9e1ec' : '#2a3752',
+    ttText: light ? '#1f2937' : '#e6edf3',
+    ttShadow: light ? 'rgba(15,23,42,.16)' : 'rgba(0,0,0,.5)',
+    pageIcon: light ? '#334155' : '#e6edf3',
+    pageIconOff: light ? '#c6cfdc' : '#3d4a61',
+    centerStrong: light ? '#111827' : '#e6edf3',
+    centerWeak: light ? '#5b6b82' : '#93a1b5',
+    amber: light ? '#b45309' : '#f5b74d',
+    markLine: light ? 'rgba(180,83,9,.6)' : 'rgba(245,183,77,.75)',
+  };
+}
+function axisStyle() {
+  const c = themeColors();
+  return { axisLine: { lineStyle: { color: c.axis } }, axisTick: { show: false },
+           axisLabel: { color: c.label, fontSize: 11 } };
+}
+function splitStyle() { return { lineStyle: { color: themeColors().split, type: 'dashed' } }; }
+function tooltipStyle() {
+  const c = themeColors();
+  return { backgroundColor: c.ttBg, borderColor: c.ttBorder,
+           textStyle: { color: c.ttText, fontSize: 12 },
+           extraCssText: `box-shadow:0 6px 20px ${c.ttShadow};border-radius:8px;` };
+}
+const GRID = { left: 8, right: 14, top: 34, bottom: 6, containLabel: true };
+
+/* ================= 数据请求 ================= */
+function computeRange() {
+  const now = Date.now();
+  if (state.range === 'custom' && state.custom.start && state.custom.end) {
+    return { start: state.custom.start, end: state.custom.end };
+  }
+  const d = new Date();
+  const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  if (state.range === 'today') return { start: dayStart, end: now };
+  if (state.range === '7d') return { start: now - 7 * 86400000, end: now };
+  if (state.range === '30d') return { start: now - 30 * 86400000, end: now };
+  if (state.range === 'month') return { start: new Date(d.getFullYear(), d.getMonth(), 1).getTime(), end: now };
+  if (state.range === 'all') return { start: 0, end: now };
+  return { start: dayStart, end: now };
+}
+function pickUnit(start, end) {
+  const h = (end - start) / 3600000;
+  if (h <= 2) return '5min';
+  if (h <= 36) return 'hour';
+  if (h <= 100 * 24) return 'day';   // 100 天以内用日桶
+  return 'week';                     // 更宽的范围用周桶（后端还会按桶数上限自动升级）
+}
+
+async function fetchData() {
+  const { start, end } = computeRange();
+  const unit = pickUnit(start, end);
+  const url = `/api/data?start=${start}&end=${end}&unit=${unit}`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    state.failCount = 0;
+    setLive('on');
+    render(data);
+  } catch (e) {
+    state.failCount++;
+    setLive('err', '连接失败，重试中…');
+  }
+}
+
+function setLive(mode, text) {
+  const el = $('live');
+  el.className = 'live ' + (mode === 'err' ? 'err' : (state.interval === 0 ? 'off' : 'on'));
+  if (text) { $('live-text').textContent = text; return; }
+  if (state.interval === 0) $('live-text').textContent = '已暂停';
+  else $('live-text').textContent = `实时 · ${state.interval / 1000}s`;
+}
+
+/* ================= 渲染 ================= */
+let renderCount = 0;
+function render(d) {
+  state.lastData = d;
+  const k = d.kpi;
+
+  $('k-total').textContent = fmtNum(k.total);
+  $('k-total-sub').innerHTML = `输入 <b>${fmtNum(k.prompt)}</b> ＋ 输出 <b>${fmtNum(k.completion)}</b>`;
+  $('k-fresh').textContent = fmtNum(k.fresh);
+  $('k-fresh-sub').innerHTML = `占输入 <b>${k.prompt ? fmtPct(k.fresh / k.prompt) : '—'}</b>`;
+  $('k-rate').textContent = k.prompt ? fmtPct(k.cache_rate) : '—';
+  $('k-rate-sub').innerHTML = `缓存读取 <b>${fmtNum(k.cached)}</b>`;
+  $('k-out').textContent = fmtNum(k.completion);
+  $('k-out-sub').innerHTML = k.reasoning ? `含推理 <b>${fmtNum(k.reasoning)}</b>` : ' (模型输出)';
+  $('k-credit').textContent = k.credits.toFixed(2);
+  $('k-credit-sub').innerHTML = `涉及 <b>${k.credit_reqs}</b> 个请求`;
+  $('k-calls').textContent = fmtInt(k.calls);
+  $('k-calls-sub').innerHTML = `时段内 <b>${d.meta.records_in_range}</b> 条记录`;
+
+  renderTrend(d);
+  renderPie(d);
+  renderRate(d);
+  renderCredit(d);
+  renderTable(d);
+  renderRequests(d);
+  renderCount++;
+  const from = d.meta.data_from ? fmtDT(d.meta.data_from) : '—';
+  const to = d.meta.data_to ? fmtDT(d.meta.data_to) : '—';
+  $('src-hint').textContent = `数据覆盖 ${from} ~ ${to}`;
+  const sup = d.meta.log_supplement || { n: 0, tokens: 0 };
+  let foot = `索引 ${d.meta.files} 文件 / ${fmtInt(d.meta.records_total)} 条调用`;
+  if (sup.n) foot += ` · 日志补充 ${sup.n} 条（trace 未落盘，${fmtNum(sup.tokens)} tokens）`;
+  foot += ` · 更新于 ${fmtClock(d.now)}`;
+  $('foot-scan').textContent = foot;
+}
+
+/* --- 主图：模型用量趋势 --- */
+function renderTrend(d) {
+  const metric = state.metric;
+  const buckets = d.trend.buckets;
+  const unit = d.meta.range.unit;
+  const models = Object.keys(d.trend.models);
+  // 数据指纹：与上次渲染完全一致时跳过，避免无谓重绘（动画重播）
+  const sig = metric + '|' + JSON.stringify(d.trend.buckets) + '|' + JSON.stringify(d.trend.models);
+  if (charts.trend.__sig === sig) return;
+  charts.trend.__sig = sig;
+  const series = [];
+  const legendData = [];
+  for (const m of models) {
+    const tr = d.trend.models[m];
+    let arr;
+    if (metric === 'total') arr = tr.p.map((v, i) => v + tr.k[i] + tr.c[i]);
+    else if (metric === 'fresh') arr = tr.p;
+    else if (metric === 'cached') arr = tr.k;
+    else arr = tr.c;
+    if (arr.every(v => !v)) continue;
+    legendData.push(m);
+    series.push({
+      name: m, type: 'bar', stack: 'total', data: arr,
+      itemStyle: { color: modelColor(m), shadowBlur: 6, shadowColor: modelColor(m) + '55' },
+      barMaxWidth: 26,
+      emphasis: { focus: 'series' },
+    });
+  }
+  const hasData = series.length > 0;
+  $('card-trend').classList.toggle('empty', !hasData);
+  const unitName = { day: '天', hour: '小时', '5min': '5 分钟', week: '周', month: '月' }[unit] || unit;
+  $('trend-sub').textContent = hasData ? `按${unitName} · ${buckets.length} 个时间点` : '';
+  if (!hasData) return;
+  const metricName = { total: '总 token', fresh: '新输入', cached: '缓存读取', completion: '输出' }[metric];
+  const option = {
+    tooltip: {
+      ...tooltipStyle(), trigger: 'axis', axisPointer: { type: 'shadow' },
+      formatter: params => {
+        if (!params.length) return '';
+        const t = axisLabel(buckets[params[0].dataIndex], unit);
+        let total = 0;
+        const rows = params.filter(p => p.value).sort((a, b) => b.value - a.value);
+        rows.forEach(p => total += p.value);
+        let html = `<b>${t}</b>　${metricName} ${fmtNum(total)}<br/>`;
+        rows.slice(0, 8).forEach(p => {
+          html += `${p.marker} ${p.seriesName}：<b>${fmtInt(p.value)}</b><br/>`;
+        });
+        if (rows.length > 8) html += `… 另 ${rows.length - 8} 个模型<br/>`;
+        return html;
+      },
+    },
+    legend: {
+      type: 'scroll', top: 0, right: 0, itemWidth: 9, itemHeight: 9,
+      textStyle: { color: themeColors().label, fontSize: 11 },
+      data: legendData,
+      pageIconColor: themeColors().pageIcon,          // 可点击箭头：高亮
+      pageIconInactiveColor: themeColors().pageIconOff,  // 不可点击箭头：暗色
+      pageIconSize: 11,
+      pageTextStyle: { color: themeColors().label, fontSize: 11 },
+    },
+    grid: GRID,
+    xAxis: { type: 'category', data: buckets.map(b => axisLabel(b, unit)), ...axisStyle(), axisLabel: { ...axisStyle().axisLabel, interval: 'auto', hideOverlap: true } },
+    yAxis: { type: 'value', splitLine: splitStyle(), axisLabel: { ...axisStyle().axisLabel, formatter: v => fmtNum(v) } },
+    series,
+    animationDuration: 300,
+  };
+  applyOption(charts.trend, option, d.trend.buckets.length);
+}
+
+/* --- 环形图 --- */
+function renderPie(d) {
+  const rows = d.models.filter(m => m.total > 0);
+  $('card-pie').classList.toggle('empty', rows.length === 0);
+  if (!rows.length) return;
+  const sig = JSON.stringify(rows.map(m => [m.m, m.total]));
+  if (charts.pie.__sig === sig) return;
+  charts.pie.__sig = sig;
+  const total = rows.reduce((s, m) => s + m.total, 0);
+  const option = {
+    tooltip: {
+      ...tooltipStyle(), trigger: 'item',
+      formatter: p => `${p.marker} ${p.name}<br/>${fmtInt(p.value)} tokens（${p.percent}%）`,
+    },
+    legend: {
+      orient: 'vertical', right: 4, top: 'middle', itemWidth: 9, itemHeight: 9,
+      textStyle: { color: themeColors().label, fontSize: 11 },
+      formatter: name => {
+        const row = rows.find(r => r.m === name);
+        return row ? `${name}  ${(row.total / total * 100).toFixed(1)}%` : name;
+      },
+    },
+    color: rows.map(r => modelColor(r.m)),
+    series: [{
+      type: 'pie',
+      radius: ['52%', '76%'],
+      center: ['34%', '50%'],
+      avoidLabelOverlap: true,
+      itemStyle: { borderWidth: 0 },
+      label: {
+        show: true, position: 'center',
+        formatter: () => `{v|${fmtNum(total)}}\n{t|总 token}`,
+        rich: {
+          v: { fontSize: 19, fontWeight: 650, color: themeColors().centerStrong, lineHeight: 26 },
+          t: { fontSize: 11, color: themeColors().centerWeak },
+        },
+      },
+      emphasis: { label: { show: true }, scaleSize: 4 },
+      data: rows.map(m => ({ name: m.m, value: m.total })),
+    }],
+    animationDuration: 400,
+  };
+  applyOption(charts.pie, option, rows.length);
+}
+
+/* --- 缓存命中率趋势 --- */
+function renderRate(d) {
+  const buckets = d.trend.buckets;
+  const unit = d.meta.range.unit;
+  const models = Object.keys(d.trend.models);
+  const cachedPer = new Array(buckets.length).fill(0);
+  const promptPer = new Array(buckets.length).fill(0);
+  for (const m of models) {
+    const tr = d.trend.models[m];
+    for (let i = 0; i < buckets.length; i++) {
+      cachedPer[i] += tr.k[i];
+      promptPer[i] += tr.p[i] + tr.k[i];
+    }
+  }
+  const rate = cachedPer.map((c, i) => promptPer[i] ? +(c / promptPer[i] * 100).toFixed(2) : null);
+  const hasData = rate.some(v => v !== null);
+  $('card-rate').classList.toggle('empty', !hasData);
+  if (!hasData) return;
+  const sig = JSON.stringify([d.trend.buckets, d.trend.models]);
+  if (charts.rate.__sig === sig) return;
+  charts.rate.__sig = sig;
+  const totalC = cachedPer.reduce((a, b) => a + b, 0);
+  const totalP = promptPer.reduce((a, b) => a + b, 0);
+  const avg = totalP ? totalC / totalP * 100 : 0;
+  const option = {
+    tooltip: {
+      ...tooltipStyle(), trigger: 'axis',
+      formatter: params => {
+        const p = params[0];
+        if (p.value === null || p.value === undefined) return '';
+        const i = p.dataIndex;
+        return `<b>${axisLabel(buckets[i], unit)}</b><br/>命中率 <b>${p.value}%</b><br/>缓存 ${fmtInt(cachedPer[i])} / 输入 ${fmtInt(promptPer[i])}`;
+      },
+    },
+    grid: GRID,
+    xAxis: { type: 'category', data: buckets.map(b => axisLabel(b, unit)), ...axisStyle(), axisLabel: { ...axisStyle().axisLabel, hideOverlap: true } },
+    yAxis: {
+      type: 'value', min: 0, max: 100,
+      splitLine: splitStyle(),
+      axisLabel: { ...axisStyle().axisLabel, formatter: '{value}%' },
+    },
+    series: [{
+      name: '命中率', type: 'line', data: rate,
+      smooth: 0.25, connectNulls: true,
+      symbol: 'circle', symbolSize: 5,
+      lineStyle: { color: '#34d399', width: 2, shadowBlur: 8, shadowColor: 'rgba(52,211,153,.35)' },
+      itemStyle: { color: '#34d399' },
+      areaStyle: {
+        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+          { offset: 0, color: 'rgba(52,211,153,.28)' },
+          { offset: 1, color: 'rgba(52,211,153,0)' },
+        ]),
+      },
+      markLine: {
+        silent: true, symbol: 'none',
+        lineStyle: { color: themeColors().markLine, type: 'dashed', width: 1 },
+        label: { formatter: `均值 ${avg.toFixed(1)}%`, color: themeColors().amber, fontSize: 11, position: 'insideEndTop' },
+        data: [{ yAxis: +avg.toFixed(2) }],
+      },
+    }],
+    animationDuration: 300,
+  };
+  applyOption(charts.rate, option, buckets.length);
+}
+
+/* --- 积分消耗 --- */
+function renderCredit(d) {
+  const buckets = d.trend.buckets;
+  const unit = d.meta.range.unit;
+  const byModel = d.credit_trend.by_model || {};
+  const rowsInRange = buckets.map((_, i) =>
+    Object.values(byModel).reduce((s, arr) => s + (arr[i] || 0), 0));
+  const hasData = rowsInRange.some(v => v > 0.0001);
+  $('card-credit').classList.toggle('empty', !hasData);
+  $('card-credit').querySelector('.sub').textContent = hasData ? `区间合计 ${d.kpi.credits.toFixed(2)}` : '';
+  if (!hasData) return;
+  const sig = JSON.stringify([d.trend.buckets, byModel]);
+  if (charts.credit.__sig === sig) return;
+  charts.credit.__sig = sig;
+  const series = [];
+  for (const [m, arr] of Object.entries(byModel)) {
+    if (arr.every(v => !v)) continue;
+    series.push({
+      name: m, type: 'bar', stack: 'cr', data: arr.map(v => +v.toFixed(3)),
+      itemStyle: { color: modelColor(m), shadowBlur: 5, shadowColor: modelColor(m) + '55' },
+      barMaxWidth: 26,
+    });
+  }
+  const option = {
+    tooltip: {
+      ...tooltipStyle(), trigger: 'axis', axisPointer: { type: 'shadow' },
+      formatter: params => {
+        if (!params.length) return '';
+        const i = params[0].dataIndex;
+        let html = `<b>${axisLabel(buckets[i], unit)}</b>　积分 ${rowsInRange[i].toFixed(2)}<br/>`;
+        params.filter(p => p.value).sort((a, b) => b.value - a.value)
+          .forEach(p => { html += `${p.marker} ${p.seriesName}：<b>${(+p.value).toFixed(2)}</b><br/>`; });
+        return html;
+      },
+    },
+    legend: {
+      type: 'scroll', top: 0, right: 0, itemWidth: 9, itemHeight: 9,
+      textStyle: { color: themeColors().label, fontSize: 11 },
+      pageIconColor: themeColors().pageIcon,          // 可点击箭头：高亮
+      pageIconInactiveColor: themeColors().pageIconOff,  // 不可点击箭头：暗色
+      pageIconSize: 11,
+      pageTextStyle: { color: themeColors().label, fontSize: 11 },
+    },
+    grid: GRID,
+    xAxis: { type: 'category', data: buckets.map(b => axisLabel(b, unit)), ...axisStyle(), axisLabel: { ...axisStyle().axisLabel, hideOverlap: true } },
+    yAxis: { type: 'value', splitLine: splitStyle(), axisLabel: { ...axisStyle().axisLabel } },
+    series,
+    animationDuration: 300,
+  };
+  applyOption(charts.credit, option, buckets.length);
+}
+
+/* --- 模型明细表 --- */
+function renderTable(d) {
+  const tb = $('tbody-models');
+  if (!d.models.length) {
+    tb.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-3);padding:22px">该时间段暂无数据</td></tr>';
+    $('table-sub').textContent = '';
+    return;
+  }
+  const sig = JSON.stringify(d.models);
+  if (tb.__sig === sig) return;
+  tb.__sig = sig;
+  const totalCr = d.models.reduce((s, m) => s + m.credits, 0);
+  const totalCost = d.models.reduce((s, m) => s + (m.cost || 0), 0);
+  $('table-sub').textContent = `合计积分 ${totalCr.toFixed(2)} · 已定价模型等价 API ${fmtCNY(totalCost)}`;
+  tb.innerHTML = d.models.map(m => {
+    const isAgg = !m.calls;   // 「未归属」等聚合行，无对应调用明细
+    let hint;
+    if (isAgg) hint = '这些积分对应的请求记录不完整，无法定位到具体模型；其中包含使用自带 API Key 的会话（自带 Key 的调用本身不消耗积分）';
+    else if (m.price) hint = m.price.src + '：缓存命中 ¥' + m.price.hit + ' / 未命中 ¥' + m.price.miss + ' / 输出 ¥' + m.price.out
+      + '（每百万 tokens' + (m.price.peak_x > 1 ? '，高峰时段 ×2，已按调用时间分别计算' : '，无峰谷') + '）'
+      + (m.price.kind === 'estimated' ? ' — 估算值' : '');
+    else hint = '未配置官方价格的模型';
+    const dash = '—';
+    return `
+    <tr${isAgg ? ' style="opacity:.85"' : ''}>
+      <td><span class="m-dot" style="background:${modelColor(m.m)}"></span>${m.m}</td>
+      <td class="num">${isAgg ? dash : fmtInt(m.calls)}</td>
+      <td class="num">${isAgg ? dash : fmtInt(m.p)}</td>
+      <td class="num">${isAgg ? dash : fmtInt(m.k)}</td>
+      <td class="num">${isAgg ? dash : fmtInt(m.c)}</td>
+      <td class="num">${isAgg ? dash : fmtInt(m.total)}</td>
+      <td class="num">${isAgg ? dash : `<span class="rate-pill">${m.rate ? fmtPct(m.rate) : '—'}</span>`}</td>
+      <td class="num" style="color:var(--amber);${isAgg ? 'cursor:help' : ''}" ${isAgg ? `title="${hint}"` : ''}>${m.credits ? m.credits.toFixed(2) : '—'}</td>
+      <td class="num" style="color:${m.cost != null ? 'var(--green)' : 'var(--text-3)'};cursor:${m.cost != null ? 'help' : 'default'}" title="${hint.replace(/"/g, '&quot;')}">${fmtCNY(m.cost)}</td>
+    </tr>`; }).join('');
+}
+
+/* --- 最近请求 --- */
+function renderRequests(d) {
+  const list = $('req-list');
+  if (!d.latest_credits.length) {
+    list.innerHTML = '<div style="text-align:center;color:var(--text-3);padding:22px">暂无积分记录</div>';
+    return;
+  }
+  const sig = JSON.stringify(d.latest_credits);
+  if (list.__sig === sig) return;
+  list.__sig = sig;
+  const thisYear = new Date().getFullYear();
+  list.innerHTML = d.latest_credits.map(c => {
+    const dt = new Date(c.t);
+    const t = (dt.getMonth() + 1) + '/' + pad2(dt.getDate()) + ' ' + pad2(dt.getHours()) + ':' + pad2(dt.getMinutes());
+    const tag = c.tsrc === 'id'
+      ? '<span class="tag">精确</span>'
+      : '<span class="tag approx">近似</span>';
+    const title = (c.title || '（未命名会话）').replace(/</g, '&lt;');
+    return `<div class="req">
+      <span class="time">${t}</span>
+      <span class="title" title="${title}">${title}</span>
+      <span class="cr">${c.cr.toFixed(2)} 积分</span>
+      ${tag}
+    </div>`;
+  }).join('');
+}
+
+/* ================= 图表通用 ================= */
+function applyOption(chart, option, bucketCount) {
+  const notMerge = chart.__buckets !== bucketCount;
+  chart.setOption(option, { notMerge, lazyUpdate: true });
+  if (notMerge) chart.__buckets = bucketCount;
+}
+
+/* ================= 交互 ================= */
+function setRange(range) {
+  state.range = range;
+  document.querySelectorAll('#range-seg button').forEach(b => {
+    b.classList.toggle('active', b.dataset.range === range);
+  });
+  $('custom-range').classList.toggle('show', range === 'custom');
+  if (range === 'custom' && !state.custom.start) {
+    const now = new Date();
+    const d0 = new Date(now.getTime() - 24 * 3600000);
+    const iso = d => `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+    $('dt-start').value = iso(d0);
+    $('dt-end').value = iso(now);
+  }
+  state.bucketCount = -1;
+  fetchData();
+}
+function applyCustom() {
+  const s = $('dt-start').value, e = $('dt-end').value;
+  if (!s || !e) return;
+  const st = new Date(s).getTime(), en = new Date(e).getTime();
+  if (!(st < en)) { alert('开始时间需早于结束时间'); return; }
+  state.custom = { start: st, end: en };
+  state.bucketCount = -1;
+  fetchData();
+}
+function setInterval_(ms) {
+  state.interval = ms;
+  document.querySelectorAll('#refresh-seg button').forEach(b => {
+    b.classList.toggle('active', +b.dataset.int === ms);
+  });
+  if (state.timer) clearInterval(state.timer);
+  state.timer = null;
+  if (ms > 0) {
+    state.timer = setInterval(fetchData, ms);
+    setLive('on');
+    fetchData();
+  } else {
+    setLive('off');
+  }
+}
+
+/* ================= 启动 ================= */
+function boot() {
+  initCharts();
+  // 主题：本地偏好已在 <head> 提前应用，这里读取状态并绑定切换按钮
+  state.theme = document.documentElement.classList.contains('light') ? 'light' : 'dark';
+  updateThemeBtn();
+  $('theme-btn').addEventListener('click', () => setTheme(state.theme === 'light' ? 'dark' : 'light'));
+  document.querySelectorAll('#range-seg button').forEach(b => {
+    b.addEventListener('click', () => setRange(b.dataset.range));
+  });
+  document.querySelectorAll('#refresh-seg button').forEach(b => {
+    b.addEventListener('click', () => setInterval_(+b.dataset.int));
+  });
+  document.querySelectorAll('#metric-seg button').forEach(b => {
+    b.addEventListener('click', () => {
+      state.metric = b.dataset.metric;
+      document.querySelectorAll('#metric-seg button').forEach(x => x.classList.toggle('active', x === b));
+      if (state.lastData) renderTrend(state.lastData);
+    });
+  });
+  $('btn-apply').addEventListener('click', applyCustom);
+
+  let rt = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(rt);
+    rt = setTimeout(() => Object.values(charts).forEach(c => c.resize()), 150);
+  });
+
+  fetchData();
+  state.timer = setInterval(fetchData, state.interval);
+}
+boot();
+</script>
+</body>
+</html>
