@@ -523,7 +523,7 @@ function pickUnit(start, end) {
 async function fetchData() {
   const { start, end } = computeRange();
   const unit = pickUnit(start, end);
-  const url = `/api/data?start=${start}&end=${end}&unit=${unit}`;
+  const url = `/api/data?start=${start}&end=${end}&unit=${unit}&iv=${state.interval}`;
   try {
     const res = await fetch(url);
     if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -577,6 +577,7 @@ function render(d) {
   const sup = d.meta.log_supplement || { n: 0, tokens: 0 };
   let foot = `索引 ${d.meta.files} 文件 / ${fmtInt(d.meta.records_total)} 条调用`;
   if (sup.n) foot += ` · 日志补充 ${sup.n} 条（trace 未落盘，${fmtNum(sup.tokens)} tokens）`;
+  if (d.meta.collect_interval) foot += ` · 采集 ${d.meta.collect_interval}s`;
   foot += ` · 更新于 ${fmtClock(d.now)}`;
   $('foot-scan').textContent = foot;
 }
@@ -922,6 +923,7 @@ function setInterval_(ms) {
     fetchData();
   } else {
     setLive('off');
+    fetchData();   // 仍请求一次：把「暂停」同步给服务端（转低频采集）
   }
 }
 

@@ -43,9 +43,25 @@ RID_RE = re.compile(r'"conversationRequestId":\s*"([0-9a-f]{32})"')
 QUA_RE = re.compile(r'qua\.end: (\{.*)$')
 LOG_LINE_TIME_RE = re.compile(
     r'^\[(\d{1,2})/(\d{1,2})/(\d{4}), (\d{1,2}):(\d{2}):(\d{2})(?:\.\d+)?\s*(AM|PM)')
-SCAN_INTERVAL = 1.5      # 索引扫描周期（秒）
+SCAN_INTERVAL = 1.5      # 索引扫描周期（秒，默认值；实际周期跟随页面刷新设置）
 LOG_SCAN_INTERVAL = 15.0  # 日志扫描周期（秒）
 CREDIT_INTERVAL = 3.0    # 积分刷新周期（秒）
+
+# 页面刷新设置（毫秒，0 = 暂停），由 /api/data 的 iv 参数更新；
+# 服务端采集周期跟随它自动调整，让用户选择的刷新频率真正决定数据新鲜度。
+CLIENT_STATE = {'interval_ms': 5000}
+
+
+def collect_interval():
+    """当前生效的服务端采集周期（秒）
+
+    跟随页面刷新设置：约 0.6 倍刷新间隔，限制在 0.6 ~ 5 秒；
+    页面暂停刷新时以 5 秒低频采集（持续归档，节省资源）。
+    """
+    iv = CLIENT_STATE.get('interval_ms', 5000)
+    if not iv:
+        return 5.0
+    return round(max(0.6, min(iv / 1000.0 * 0.6, 5.0)), 2)
 RID_TIME_TOLERANCE = 6 * 3600 * 1000   # span 时间与 requestId 时间戳的最大容忍差
 TS_MIN, TS_MAX = 1577836800000, 1893456000000   # 2020-01-01 ~ 2030-01-01
 
@@ -797,6 +813,7 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
             'records_in_range': len(recs),
             'files': len(index.by_file),
             'scan': {'last': index.last_scan, 'ms': index.last_scan_ms, 'errors': index.error_files},
+            'collect_interval': collect_interval(),
             'log_supplement': {'n': len(supplements), 'tokens': supp_tokens,
                                'log_files': len(log_index.by_file) if log_index else 0,
                                'log_records': len(log_index.records) if log_index else 0},
@@ -837,12 +854,13 @@ def refresh_loop():
     last_credit = 0
     last_log = 0
     while True:
+        step = collect_interval()
         try:
             INDEX.scan()
         except Exception:
             pass
         now = time.time()
-        if now - last_log > LOG_SCAN_INTERVAL:
+        if now - last_log > max(step * 4.0, 12.0):
             try:
                 LOGS.scan()
             except Exception:
@@ -853,14 +871,14 @@ def refresh_loop():
             ARCHIVE.sync_calls(INDEX.records, LOGS.records)
         except Exception:
             pass
-        if now - last_credit > CREDIT_INTERVAL:
+        if now - last_credit > max(step * 2.0, 2.0):
             try:
                 CREDITS.refresh()
                 ARCHIVE.sync_credits(CREDITS.rows)
             except Exception:
                 pass
             last_credit = now
-        time.sleep(SCAN_INTERVAL)
+        time.sleep(step)
 
 
 MIME = {
@@ -905,6 +923,13 @@ class Handler(BaseHTTPRequestHandler):
                 start = int(qs.get('start', [str(now - 86400000)])[0])
                 end = int(qs.get('end', [str(now)])[0])
                 unit = qs.get('unit', ['hour'])[0]
+                # 页面刷新设置（毫秒，0 = 暂停）→ 服务端采集周期跟随
+                iv_raw = qs.get('iv', [None])[0]
+                if iv_raw is not None:
+                    try:
+                        CLIENT_STATE['interval_ms'] = max(0, int(float(iv_raw)))
+                    except (TypeError, ValueError):
+                        pass
                 if unit not in ('5min', 'hour', 'day', 'week', 'month'):
                     unit = 'hour'
                 if end <= start:
