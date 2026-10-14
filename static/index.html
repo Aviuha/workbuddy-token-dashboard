@@ -964,7 +964,7 @@ function renderRequests(d) {
     const dt = new Date(c.t);
     const t = (dt.getMonth() + 1) + '/' + pad2(dt.getDate()) + ' ' + pad2(dt.getHours()) + ':' + pad2(dt.getMinutes());
     const tag = c.tsrc === 'id'
-      ? '<span class="tag">精确</span>'
+      ? ''                                    // 「精确」为默认状态，不再标注
       : '<span class="tag approx">近似</span>';
     const title = (c.title || '（未命名会话）').replace(/</g, '&lt;');
     const tk = c.tokens ? `<span class="tk">${fmtNum(c.tokens)} tokens</span>` : '';
