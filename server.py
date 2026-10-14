@@ -28,10 +28,55 @@ from urllib.parse import urlparse, parse_qs
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 HOME = os.path.expanduser('~')
-WB_DIR = os.path.join(HOME, '.workbuddy')
+
+
+def _pick_wb_dir():
+    """定位 WorkBuddy 数据目录（跨平台）。
+
+    - 环境变量 WORKBUDDY_HOME 优先（手动指定）
+    - 用户级 ~/.workbuddy（macOS / Linux / Windows 的主位置）
+    - Windows 备选：ProgramData\\WorkBuddy\\users\\<用户>\\.workbuddy、
+      %APPDATA%\\WorkBuddy、%LOCALAPPDATA%\\WorkBuddy
+    - 多个候选同时存在时，取「最近有活动」（db 或 traces 目录最新修改）的一个
+    """
+    env = os.environ.get('WORKBUDDY_HOME')
+    if env and os.path.isdir(env):
+        return env
+    cands = [os.path.join(HOME, '.workbuddy')]
+    if os.name == 'nt':
+        pd = os.environ.get('PROGRAMDATA')
+        user = os.environ.get('USERNAME')
+        if pd and user:
+            cands.append(os.path.join(pd, 'WorkBuddy', 'users', user, '.workbuddy'))
+        ad = os.environ.get('APPDATA')
+        if ad:
+            cands.append(os.path.join(ad, 'WorkBuddy'))
+        ld = os.environ.get('LOCALAPPDATA')
+        if ld:
+            cands.append(os.path.join(ld, 'WorkBuddy'))
+    best, best_m = None, -1.0
+    for c in cands:
+        if not os.path.isdir(c):
+            continue
+        m = 0.0
+        for probe in (os.path.join(c, 'workbuddy.db'),
+                      os.path.join(c, 'traces'),
+                      os.path.join(c, 'logs')):
+            try:
+                m = max(m, os.path.getmtime(probe))
+            except OSError:
+                pass
+        if m > best_m:
+            best, best_m = c, m
+    return best or cands[0]
+
+
+WB_DIR = _pick_wb_dir()
 TRACES_DIR = os.path.join(WB_DIR, 'traces')
 LOGS_DIR = os.path.join(WB_DIR, 'logs')
 DB_PATH = os.path.join(WB_DIR, 'workbuddy.db')
+# SQLite URI 在 Windows 下需正斜杠，否则含盘符的反斜杠路径无法解析
+DB_URI = 'file:' + DB_PATH.replace('\\', '/') + '?mode=ro'
 STATIC_DIR = os.path.join(BASE, 'static')
 CACHE_FILE = os.path.join(BASE, 'data', 'index-cache.json')
 LOG_CACHE_FILE = os.path.join(BASE, 'data', 'log-index-cache.json')
@@ -607,7 +652,7 @@ class CreditStore:
 
     def refresh(self):
         try:
-            con = sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True, timeout=3)
+            con = sqlite3.connect(DB_URI, uri=True, timeout=3)
             cur = con.cursor()
             sessions = {}
             try:

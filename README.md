@@ -25,6 +25,15 @@
 **环境要求**：Python 3.11+。无任何 pip 依赖。
 若本机已安装 WorkBuddy，其自带的 Python 会被自动使用，无需额外安装。
 
+**数据目录定位（Windows 用户请注意）**：默认读取 `~/.workbuddy`（Windows 即
+`%USERPROFILE%\.workbuddy`，为 WorkBuddy 的主数据目录）。Windows 下若同时存在 agent 级目录
+`%PROGRAMDATA%\WorkBuddy\users\<用户名>\.workbuddy`，程序会自动比较两者、选择**最近有活动**的一个；
+也可用环境变量 `WORKBUDDY_HOME` 手动指定数据目录，例如：
+
+```bash
+WORKBUDDY_HOME="D:\path\to\.workbuddy" python server.py   # Windows PowerShell: $env:WORKBUDDY_HOME="..."
+```
+
 **macOS / Linux**
 
 ```bash
