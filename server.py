@@ -705,7 +705,8 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
             if p < 0 or c < 0:
                 continue
             supplements.append({'t': lr['t'], 'm': lr['m'], 'p': p, 'c': c,
-                                'k': int(p * cov_rate), 'r': 0, 'q': lr.get('q'), 'supp': True})
+                                'k': int(p * cov_rate), 'r': 0, 'q': lr.get('q'), 'supp': True,
+                                'd': lr.get('d')})
     supp_tokens = sum(r['p'] + r['c'] for r in supplements)
     recs = trace_recs + supplements
 
