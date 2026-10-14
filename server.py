@@ -827,6 +827,57 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
                                'title': sess.get('title') or '',
                                'tokens': rid_tok.get(c['rid'], 0)})
 
+    # 任务统计：按请求聚合（同一任务跨模型合并，不拆分），列口径与模型明细一致
+    task_agg = {}
+    for r in mid_best.values():
+        q = r.get('q')
+        if not q:
+            continue
+        t = task_agg.get(q)
+        if t is None:
+            t = task_agg[q] = {'rid': q, 'calls': 0, 'p': 0, 'k': 0, 'c': 0,
+                               'dur': 0, 'c_dur': 0, 'cost': 0.0,
+                               'first': r['t'], 'last': r['t'], 'models': set()}
+        t['calls'] += 1
+        t['p'] += r['p']
+        t['k'] += r['k']
+        t['c'] += r['c']
+        if r.get('d'):
+            t['dur'] += r['d']
+            t['c_dur'] += r['c']
+        price = PRICING.get(r['m'])
+        if price:
+            fresh = r['p'] - r['k']
+            mult = price['peak_x'] if (price['peak_x'] > 1 and is_peak_cn(r['t'])) else 1.0
+            t['cost'] += (r['k'] * price['hit'] + fresh * price['miss'] + r['c'] * price['out']) * mult / 1e6
+        if r['t'] < t['first']:
+            t['first'] = r['t']
+        if r['t'] > t['last']:
+            t['last'] = r['t']
+        t['models'].add(r['m'])
+
+    task_stats = []
+    for t in task_agg.values():
+        if not (start_ms <= t['first'] < end_ms):
+            continue
+        meta = credit_rid.get(t['rid'])
+        sess = credit_store.sessions.get(meta['sid']) if meta else None
+        task_stats.append({
+            'rid': t['rid'][:12],
+            't': t['first'], 'last': t['last'],
+            'title': (sess or {}).get('title') or '',
+            'models': sorted(t['models']),
+            'calls': t['calls'],
+            'p': t['p'] - t['k'], 'k': t['k'], 'c': t['c'],
+            'total': t['p'] + t['c'],
+            'speed': round(t['c_dur'] / (t['dur'] / 1000.0), 1) if t['dur'] else None,
+            'rate': (t['k'] / t['p']) if t['p'] else 0.0,
+            'credits': round(meta['cr'], 4) if meta else 0.0,
+            'cost': round(t['cost'], 4),
+        })
+    task_stats.sort(key=lambda x: -x['t'])
+    task_stats = task_stats[:300]
+
     # 最近调用明细
     recent = []
     for r in recs[-40:][::-1]:
@@ -887,6 +938,7 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
         'credit_trend': {'buckets': buckets, 'by_model': credit_trend,
                          'by_model_total': {k: round(v, 4) for k, v in credit_by_model.items()}},
         'latest_credits': latest_credits,
+        'task_stats': task_stats,
         'recent': recent,
     }
 

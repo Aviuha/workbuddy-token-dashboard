@@ -152,6 +152,9 @@
 
   /* ---------- 表格 ---------- */
   .table-wrap { overflow-x: auto; }
+  .table-scroll { max-height: 430px; overflow-y: auto; }
+  .time-inline { color: var(--text-3); font-size: 11px; margin-right: 6px; font-variant-numeric: tabular-nums; }
+  .task-cell { max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   th {
     text-align: left; font-weight: 500; color: var(--text-3); font-size: 11px;
@@ -339,7 +342,7 @@
       <div class="card-head"><h2>模型明细</h2><span class="sub" id="table-sub"></span></div>
       <div class="table-wrap">
         <table>
-          <thead>
+          <thead id="thead-models">
             <tr>
               <th class="sortable" data-sort="m">模型<span class="arrow"></span></th>
               <th class="num sortable" data-sort="calls">调用<span class="arrow"></span></th>
@@ -360,6 +363,28 @@
     <div class="card span2">
       <div class="card-head"><h2>最近请求</h2><span class="sub">按完成时间 · 含积分</span></div>
       <div class="req-list" id="req-list"></div>
+    </div>
+    <div class="card span2">
+      <div class="card-head"><h2>任务统计</h2><span class="sub" id="task-sub"></span></div>
+      <div class="table-wrap table-scroll">
+        <table>
+          <thead id="thead-tasks">
+            <tr>
+              <th class="sortable" data-sort="t" style="max-width:360px">任务<span class="arrow"></span></th>
+              <th class="num sortable" data-sort="calls">调用<span class="arrow"></span></th>
+              <th class="num sortable" data-sort="p">输入<br>（缓存未命中）<span class="arrow"></span></th>
+              <th class="num sortable" data-sort="k">输入<br>（缓存命中）<span class="arrow"></span></th>
+              <th class="num sortable" data-sort="c">输出<span class="arrow"></span></th>
+              <th class="num sortable" data-sort="total">总计<span class="arrow"></span></th>
+              <th class="num sortable" data-sort="speed" title="生成速度 = 输出 tokens ÷ 生成耗时（仅统计有耗时记录的调用）">速度<span class="arrow"></span></th>
+              <th class="num sortable" data-sort="rate">命中率<span class="arrow"></span></th>
+              <th class="num sortable" data-sort="credits">积分<span class="arrow"></span></th>
+              <th class="num sortable" data-sort="cost">等价 API<span class="arrow"></span></th>
+            </tr>
+          </thead>
+          <tbody id="tbody-tasks"></tbody>
+        </table>
+      </div>
     </div>
   </div>
 
@@ -442,6 +467,7 @@ const state = {
   failCount: 0,
   theme: 'dark',
   sort: { key: 'total', dir: -1 },   // 模型明细排序（默认按总计降序）
+  sortTask: { key: 't', dir: -1 },   // 任务统计排序（默认按时间倒序）
 };
 
 /* ================= 主题 ================= */
@@ -579,6 +605,7 @@ function render(d) {
   renderCredit(d);
   renderTable(d);
   renderRequests(d);
+  renderTasks(d);
   renderCount++;
   const from = d.meta.data_from ? fmtDT(d.meta.data_from) : '—';
   const to = d.meta.data_to ? fmtDT(d.meta.data_to) : '—';
@@ -835,12 +862,57 @@ function sortModels(models) {
   });
 }
 
-function updateSortMarks() {
-  document.querySelectorAll('th.sortable').forEach(th => {
-    const active = th.dataset.sort === state.sort.key;
+function markSort(theadId, sortState) {
+  document.querySelectorAll(`#${theadId} th.sortable`).forEach(th => {
+    const active = th.dataset.sort === sortState.key;
     th.classList.toggle('active', active);
-    th.querySelector('.arrow').textContent = active ? (state.sort.dir < 0 ? '▼' : '▲') : '';
+    th.querySelector('.arrow').textContent = active ? (sortState.dir < 0 ? '▼' : '▲') : '';
   });
+}
+function updateSortMarks() { markSort('thead-models', state.sort); }
+function updateTaskSortMarks() { markSort('thead-tasks', state.sortTask); }
+
+function sortTasks(tasks) {
+  const { key, dir } = state.sortTask;
+  return tasks.slice().sort((a, b) => {
+    if (key === 't') return (a.t - b.t) * dir;
+    const na = a[key] == null ? -Infinity : a[key];
+    const nb = b[key] == null ? -Infinity : b[key];
+    return (na - nb) * dir;
+  });
+}
+
+function renderTasks(d) {
+  const tb = $('tbody-tasks');
+  const tasks = d.task_stats || [];
+  $('task-sub').textContent = tasks.length
+    ? `${tasks.length} 个任务 · 按任务聚合（跨模型合并）` : '';
+  if (!tasks.length) {
+    tb.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-3);padding:22px">该时间段暂无任务</td></tr>';
+    return;
+  }
+  const sig = JSON.stringify([tasks, state.sortTask]);
+  if (tb.__sig === sig) return;
+  tb.__sig = sig;
+  const dash = '—';
+  tb.innerHTML = sortTasks(tasks).map(x => {
+    const dt = new Date(x.t);
+    const ts = (dt.getMonth() + 1) + '/' + pad2(dt.getDate()) + ' ' + pad2(dt.getHours()) + ':' + pad2(dt.getMinutes());
+    const title = (x.title || '（未命名会话）').replace(/</g, '&lt;');
+    const modelHint = (x.models || []).join('、');
+    return `<tr>
+      <td class="task-cell" title="${modelHint.replace(/"/g, '&quot;')}"><span class="time-inline">${ts}</span>${title}</td>
+      <td class="num">${fmtInt(x.calls)}</td>
+      <td class="num">${x.p ? fmtInt(x.p) : '0'}</td>
+      <td class="num">${fmtInt(x.k)}</td>
+      <td class="num">${fmtInt(x.c)}</td>
+      <td class="num">${fmtInt(x.total)}</td>
+      <td class="num">${x.speed == null ? dash : `${x.speed.toFixed(1)}<span class="u">tok/s</span>`}</td>
+      <td class="num">${x.rate ? `<span class="rate-pill">${fmtPct(x.rate)}</span>` : dash}</td>
+      <td class="num" style="color:var(--amber)">${x.credits ? x.credits.toFixed(2) : dash}</td>
+      <td class="num" style="color:${x.cost ? 'var(--green)' : 'var(--text-3)'}">${fmtCNY(x.cost)}</td>
+    </tr>`;
+  }).join('');
 }
 
 function renderTable(d) {
@@ -980,7 +1052,7 @@ function boot() {
     });
   });
   // 模型明细：点击表头切换排序（同列再点=升降序切换；新列默认：数值降序、模型名升序）
-  document.querySelectorAll('th.sortable').forEach(th => {
+  document.querySelectorAll('#thead-models th.sortable').forEach(th => {
     th.addEventListener('click', () => {
       const key = th.dataset.sort;
       if (state.sort.key === key) state.sort.dir *= -1;
@@ -990,6 +1062,17 @@ function boot() {
     });
   });
   updateSortMarks();
+  // 任务统计：同样支持表头排序（默认按时间倒序）
+  document.querySelectorAll('#thead-tasks th.sortable').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.sort;
+      if (state.sortTask.key === key) state.sortTask.dir *= -1;
+      else state.sortTask = { key, dir: -1 };
+      updateTaskSortMarks();
+      if (state.lastData) renderTasks(state.lastData);
+    });
+  });
+  updateTaskSortMarks();
   $('btn-apply').addEventListener('click', applyCustom);
 
   let rt = null;
