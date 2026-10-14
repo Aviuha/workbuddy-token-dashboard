@@ -552,10 +552,10 @@ class Archive:
     def query_calls(self, start_ms, end_ms):
         with self.lock:
             rows = self.con.execute(
-                'SELECT src, ts, model, pt, k, ct, rr, rid, dur FROM calls '
+                'SELECT uid, src, ts, model, pt, k, ct, rr, rid, dur FROM calls '
                 'WHERE ts >= ? AND ts < ? ORDER BY ts', (start_ms, end_ms)).fetchall()
-        return [{'src': r[0], 't': r[1], 'm': r[2], 'p': r[3], 'k': r[4],
-                 'c': r[5], 'r': r[6], 'q': r[7], 'd': r[8]} for r in rows]
+        return [{'i': r[0][2:], 'src': r[1], 't': r[2], 'm': r[3], 'p': r[4], 'k': r[5],
+                 'c': r[6], 'r': r[7], 'q': r[8], 'd': r[9]} for r in rows]
 
     def sync_credits(self, rows):
         if not rows:
@@ -794,6 +794,29 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
             cd[bi] += c['cr']
 
     # 最新积分记录（不限范围，展示用）
+    # 每请求总 token：同一调用的双源记录（trace/log）先合并——
+    # trace 版优先（含缓存明细），rid 取任一版本非空（trace 常因截断缺 rid）。
+    mid_best = {}
+    for r in all_recs:
+        mid = r.get('i')
+        if not mid:
+            continue
+        cur = mid_best.get(mid)
+        if cur is None:
+            mid_best[mid] = r
+            continue
+        keep_trace = r.get('src') == 'trace' and cur.get('src') != 'trace'
+        base, other = (r, cur) if keep_trace else (cur, r)
+        if not base.get('q') and other.get('q'):
+            base = dict(base)
+            base['q'] = other['q']
+        mid_best[mid] = base
+    rid_tok = {}
+    for r in mid_best.values():
+        q = r.get('q')
+        if q:
+            rid_tok[q] = rid_tok.get(q, 0) + r['p'] + r['c']
+
     credit_rid = {c['rid']: c for c in credit_rows}
     latest_credits = []
     for c in sorted(credit_rows, key=lambda x: -x['t'])[:8]:
@@ -801,7 +824,8 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
         sess = credit_store.sessions.get(c['sid']) or {}
         latest_credits.append({'t': c['t'], 'cr': round(c['cr'], 4), 'm': m,
                                'tsrc': c['tsrc'], 'sid': c['sid'][:8],
-                               'title': sess.get('title') or ''})
+                               'title': sess.get('title') or '',
+                               'tokens': rid_tok.get(c['rid'], 0)})
 
     # 最近调用明细
     recent = []

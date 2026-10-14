@@ -182,6 +182,7 @@
   .req:last-child { border-bottom: 0; }
   .req .time { color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums; flex-shrink: 0; width: 86px; }
   .req .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); font-size: 12px; }
+  .req .tk { color: var(--text-2); font-size: 12px; font-variant-numeric: tabular-nums; flex-shrink: 0; }
   .req .cr { color: var(--amber); font-variant-numeric: tabular-nums; font-size: 12px; flex-shrink: 0; }
   .tag {
     font-size: 10px; padding: 1px 6px; border-radius: 99px; flex-shrink: 0;
@@ -897,9 +898,11 @@ function renderRequests(d) {
       ? '<span class="tag">精确</span>'
       : '<span class="tag approx">近似</span>';
     const title = (c.title || '（未命名会话）').replace(/</g, '&lt;');
+    const tk = c.tokens ? `<span class="tk">${fmtNum(c.tokens)} tokens</span>` : '';
     return `<div class="req">
       <span class="time">${t}</span>
       <span class="title" title="${title}">${title}</span>
+      ${tk}
       <span class="cr">${c.cr.toFixed(2)} 积分</span>
       ${tag}
     </div>`;
