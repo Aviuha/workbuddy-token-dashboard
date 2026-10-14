@@ -161,6 +161,11 @@
   tr:last-child td { border-bottom: 0; }
   tr:hover td { background: var(--hover); }
   td.num, th.num { text-align: right; }
+  th.sortable { cursor: pointer; user-select: none; line-height: 1.35; }
+  th.sortable:hover { color: var(--text-2); }
+  th.sortable .arrow { font-size: 8px; margin-left: 4px; color: var(--accent); opacity: 0; }
+  th.sortable.active { color: var(--text-2); }
+  th.sortable.active .arrow { opacity: 1; }
   .m-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; vertical-align: 1px; }
   .rate-pill {
     display: inline-block; padding: 1px 7px; border-radius: 99px; font-size: 11px;
@@ -335,16 +340,16 @@
         <table>
           <thead>
             <tr>
-              <th>模型</th>
-              <th class="num">调用</th>
-              <th class="num">新输入</th>
-              <th class="num">缓存读取</th>
-              <th class="num">输出</th>
-              <th class="num">总计</th>
-              <th class="num" title="生成速度 = 输出 tokens ÷ 生成耗时（仅统计有耗时记录的调用）">速度</th>
-              <th class="num">命中率</th>
-              <th class="num">积分</th>
-              <th class="num">等价 API</th>
+              <th class="sortable" data-sort="m">模型<span class="arrow"></span></th>
+              <th class="num sortable" data-sort="calls">调用<span class="arrow"></span></th>
+              <th class="num sortable" data-sort="p">输入<br>（缓存未命中）<span class="arrow"></span></th>
+              <th class="num sortable" data-sort="k">输入<br>（缓存命中）<span class="arrow"></span></th>
+              <th class="num sortable" data-sort="c">输出<span class="arrow"></span></th>
+              <th class="num sortable" data-sort="total">总计<span class="arrow"></span></th>
+              <th class="num sortable" data-sort="speed" title="生成速度 = 输出 tokens ÷ 生成耗时（仅统计有耗时记录的调用）">速度<span class="arrow"></span></th>
+              <th class="num sortable" data-sort="rate">命中率<span class="arrow"></span></th>
+              <th class="num sortable" data-sort="credits">积分<span class="arrow"></span></th>
+              <th class="num sortable" data-sort="cost">等价 API<span class="arrow"></span></th>
             </tr>
           </thead>
           <tbody id="tbody-models"></tbody>
@@ -435,6 +440,7 @@ const state = {
   timer: null,
   failCount: 0,
   theme: 'dark',
+  sort: { key: 'total', dir: -1 },   // 模型明细排序（默认按总计降序）
 };
 
 /* ================= 主题 ================= */
@@ -816,6 +822,26 @@ function renderCredit(d) {
 }
 
 /* --- 模型明细表 --- */
+function sortModels(models) {
+  const { key, dir } = state.sort;
+  return models.slice().sort((a, b) => {
+    const aAgg = !a.calls, bAgg = !b.calls;   // 「未归属」等聚合行固定排在末尾
+    if (aAgg !== bAgg) return aAgg ? 1 : -1;
+    if (key === 'm') return a.m.localeCompare(b.m, 'zh') * dir;
+    const na = a[key] == null ? -Infinity : a[key];
+    const nb = b[key] == null ? -Infinity : b[key];
+    return (na - nb) * dir;
+  });
+}
+
+function updateSortMarks() {
+  document.querySelectorAll('th.sortable').forEach(th => {
+    const active = th.dataset.sort === state.sort.key;
+    th.classList.toggle('active', active);
+    th.querySelector('.arrow').textContent = active ? (state.sort.dir < 0 ? '▼' : '▲') : '';
+  });
+}
+
 function renderTable(d) {
   const tb = $('tbody-models');
   if (!d.models.length) {
@@ -823,13 +849,13 @@ function renderTable(d) {
     $('table-sub').textContent = '';
     return;
   }
-  const sig = JSON.stringify(d.models);
+  const sig = JSON.stringify([d.models, state.sort]);
   if (tb.__sig === sig) return;
   tb.__sig = sig;
   const totalCr = d.models.reduce((s, m) => s + m.credits, 0);
   const totalCost = d.models.reduce((s, m) => s + (m.cost || 0), 0);
   $('table-sub').textContent = `合计积分 ${totalCr.toFixed(2)} · 已定价模型等价 API ${fmtCNY(totalCost)}`;
-  tb.innerHTML = d.models.map(m => {
+  tb.innerHTML = sortModels(d.models).map(m => {
     const isAgg = !m.calls;   // 「未归属」等聚合行，无对应调用明细
     let hint;
     if (isAgg) hint = '这些积分对应的请求记录不完整，无法定位到具体模型；其中包含使用自带 API Key 的会话（自带 Key 的调用本身不消耗积分）';
@@ -950,6 +976,17 @@ function boot() {
       if (state.lastData) renderTrend(state.lastData);
     });
   });
+  // 模型明细：点击表头切换排序（同列再点=升降序切换；新列默认：数值降序、模型名升序）
+  document.querySelectorAll('th.sortable').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.sort;
+      if (state.sort.key === key) state.sort.dir *= -1;
+      else state.sort = { key, dir: key === 'm' ? 1 : -1 };
+      updateSortMarks();
+      if (state.lastData) renderTable(state.lastData);
+    });
+  });
+  updateSortMarks();
   $('btn-apply').addEventListener('click', applyCustom);
 
   let rt = null;
