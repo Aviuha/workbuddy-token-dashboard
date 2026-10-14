@@ -387,7 +387,8 @@ def parse_log_file(path):
                 recs.append({'t': t, 'm': d.get('model') or 'unknown',
                              'pt': pt, 'tt': tt, 'mid': mid,
                              'q': d.get('conversation_request_id'),
-                             'sid': d.get('conversation_id')})
+                             'sid': d.get('conversation_id'),
+                             'd': int(d.get('total_cost_ms') or 0) or None})
     except Exception:
         return None
     return recs
@@ -408,7 +409,7 @@ class LogIndex:
         try:
             with open(LOG_CACHE_FILE, 'r', encoding='utf-8') as fh:
                 data = json.load(fh)
-            if data.get('v') != 3:
+            if data.get('v') != 4:
                 self.by_file = {}
                 return
             self.by_file = data.get('files', {})
@@ -420,7 +421,7 @@ class LogIndex:
             os.makedirs(os.path.dirname(LOG_CACHE_FILE), exist_ok=True)
             tmp = LOG_CACHE_FILE + '.tmp'
             with open(tmp, 'w', encoding='utf-8') as fh:
-                json.dump({'v': 3, 'files': self.by_file, 'saved': int(time.time() * 1000)}, fh)
+                json.dump({'v': 4, 'files': self.by_file, 'saved': int(time.time() * 1000)}, fh)
             os.replace(tmp, LOG_CACHE_FILE)
         except Exception:
             pass
@@ -529,7 +530,7 @@ class Archive:
                 continue
             self.known.add(uid)
             pending.append((uid, 'log', r['t'], r['m'], r['pt'], 0, r['tt'] - r['pt'], 0,
-                            r.get('q'), None, r.get('sid')))
+                            r.get('q'), r.get('d'), r.get('sid')))
         if not pending:
             return 0
         with self.lock:
@@ -540,10 +541,12 @@ class Archive:
         self.synced_calls += len(pending)
         return len(pending)
 
-    def backfill_durations(self, trace_recs):
-        """一次性迁移：为已归档但缺耗时的 trace 记录回填 dur（幂等）"""
+    def backfill_durations(self, trace_recs, log_recs):
+        """一次性迁移：为已归档但缺耗时的记录回填 dur（trace 与日志双源，幂等）"""
         rows = [(r['d'], 't:' + r['i']) for r in trace_recs
                 if r.get('i') and r.get('d')]
+        rows += [(r['d'], 'l:' + r['mid']) for r in log_recs
+                 if r.get('mid') and r.get('d')]
         if not rows:
             return 0
         with self.lock:
@@ -1110,7 +1113,7 @@ def main():
     LOGS = LogIndex()
     ARCHIVE = Archive()
     n_new = ARCHIVE.sync_calls(INDEX.records, LOGS.records)
-    n_bf = ARCHIVE.backfill_durations(INDEX.records)   # 历史记录回填耗时（一次性迁移）
+    n_bf = ARCHIVE.backfill_durations(INDEX.records, LOGS.records)   # 历史记录回填耗时（一次性迁移）
     n_bf_sid = ARCHIVE.backfill_sids(LOGS.records)     # 历史记录回填会话（一次性迁移）
     CREDITS = CreditStore()
     ARCHIVE.sync_credits(CREDITS.rows)
