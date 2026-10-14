@@ -300,7 +300,6 @@
     <div class="card" id="card-trend">
       <div class="card-head">
         <h2>模型用量趋势</h2>
-        <span class="sub" id="trend-sub"></span>
         <div class="mini-seg" id="metric-seg">
           <button data-metric="total" class="active">总量</button>
           <button data-metric="fresh">新输入</button>
@@ -314,7 +313,6 @@
     <div class="card" id="card-pie">
       <div class="card-head">
         <h2>模型占比</h2>
-        <span class="sub">按总 token</span>
       </div>
       <div class="chart tall" id="ch-pie"></div>
       <div class="empty-overlay">该时间段暂无数据</div>
@@ -648,8 +646,6 @@ function renderTrend(d) {
   }
   const hasData = series.length > 0;
   $('card-trend').classList.toggle('empty', !hasData);
-  const unitName = { day: '天', hour: '小时', '5min': '5 分钟', week: '周', month: '月' }[unit] || unit;
-  $('trend-sub').textContent = hasData ? `按${unitName} · ${buckets.length} 个时间点` : '';
   if (!hasData) return;
   const metricName = { total: '总 token', fresh: '新输入', cached: '缓存读取', completion: '输出' }[metric];
   const option = {
