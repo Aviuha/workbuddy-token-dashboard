@@ -882,7 +882,7 @@ function renderTasks(d) {
   const tb = $('tbody-tasks');
   const tasks = d.task_stats || [];
   $('task-sub').textContent = tasks.length
-    ? `${tasks.length} 个任务 · 按任务聚合（跨模型合并）` : '';
+    ? `${tasks.length} 个任务 · 同一任务（会话）的多轮请求合并统计` : '';
   if (!tasks.length) {
     tb.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-3);padding:22px">该时间段暂无任务</td></tr>';
     return;
@@ -895,7 +895,8 @@ function renderTasks(d) {
     const dt = new Date(x.t);
     const ts = (dt.getMonth() + 1) + '/' + pad2(dt.getDate()) + ' ' + pad2(dt.getHours()) + ':' + pad2(dt.getMinutes());
     const title = (x.title || '（未命名会话）').replace(/</g, '&lt;');
-    const modelHint = (x.models || []).join('、');
+    const rounds = x.reqs > 1 ? `${x.reqs} 轮对话 · ` : '';
+    const modelHint = rounds + (x.models || []).join('、');
     return `<tr>
       <td class="task-cell" title="${modelHint.replace(/"/g, '&quot;')}"><span class="time-inline">${ts}</span>${title}</td>
       <td class="num">${fmtInt(x.calls)}</td>

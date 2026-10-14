@@ -386,7 +386,8 @@ def parse_log_file(path):
                     continue
                 recs.append({'t': t, 'm': d.get('model') or 'unknown',
                              'pt': pt, 'tt': tt, 'mid': mid,
-                             'q': d.get('conversation_request_id')})
+                             'q': d.get('conversation_request_id'),
+                             'sid': d.get('conversation_id')})
     except Exception:
         return None
     return recs
@@ -407,7 +408,7 @@ class LogIndex:
         try:
             with open(LOG_CACHE_FILE, 'r', encoding='utf-8') as fh:
                 data = json.load(fh)
-            if data.get('v') != 2:
+            if data.get('v') != 3:
                 self.by_file = {}
                 return
             self.by_file = data.get('files', {})
@@ -419,7 +420,7 @@ class LogIndex:
             os.makedirs(os.path.dirname(LOG_CACHE_FILE), exist_ok=True)
             tmp = LOG_CACHE_FILE + '.tmp'
             with open(tmp, 'w', encoding='utf-8') as fh:
-                json.dump({'v': 2, 'files': self.by_file, 'saved': int(time.time() * 1000)}, fh)
+                json.dump({'v': 3, 'files': self.by_file, 'saved': int(time.time() * 1000)}, fh)
             os.replace(tmp, LOG_CACHE_FILE)
         except Exception:
             pass
@@ -502,6 +503,8 @@ class Archive:
             cols = {row[1] for row in c.execute('PRAGMA table_info(calls)')}
             if 'dur' not in cols:      # v2 迁移：新增调用耗时（毫秒）
                 c.execute('ALTER TABLE calls ADD COLUMN dur INTEGER')
+            if 'sid' not in cols:      # v3 迁移：新增所属会话（用于按任务合并）
+                c.execute('ALTER TABLE calls ADD COLUMN sid TEXT')
             c.execute('CREATE INDEX IF NOT EXISTS idx_calls_ts ON calls(ts)')
             c.execute('''CREATE TABLE IF NOT EXISTS credits (
                 rid TEXT PRIMARY KEY, cr REAL, sid TEXT, t INTEGER,
@@ -519,20 +522,20 @@ class Archive:
                 continue
             self.known.add(uid)
             pending.append((uid, 'trace', r['t'], r['m'], r['p'], r['k'], r['c'], r['r'],
-                            r.get('q'), r.get('d')))
+                            r.get('q'), r.get('d'), None))
         for r in log_recs:
             uid = 'l:' + (r.get('mid') or ('%d|%s|%d|%d' % (r['t'], r['m'], r['pt'], r['tt'])))
             if uid in self.known:
                 continue
             self.known.add(uid)
             pending.append((uid, 'log', r['t'], r['m'], r['pt'], 0, r['tt'] - r['pt'], 0,
-                            r.get('q'), None))
+                            r.get('q'), None, r.get('sid')))
         if not pending:
             return 0
         with self.lock:
             self.con.executemany(
-                'INSERT OR IGNORE INTO calls (uid, src, ts, model, pt, k, ct, rr, rid, dur) '
-                'VALUES (?,?,?,?,?,?,?,?,?,?)', pending)
+                'INSERT OR IGNORE INTO calls (uid, src, ts, model, pt, k, ct, rr, rid, dur, sid) '
+                'VALUES (?,?,?,?,?,?,?,?,?,?,?)', pending)
             self.con.commit()
         self.synced_calls += len(pending)
         return len(pending)
@@ -549,13 +552,25 @@ class Archive:
             self.con.commit()
         return cur.rowcount or 0
 
+    def backfill_sids(self, log_recs):
+        """一次性迁移：为已归档但缺会话的日志记录回填 sid（幂等）"""
+        rows = [(r['sid'], 'l:' + r['mid']) for r in log_recs
+                if r.get('mid') and r.get('sid')]
+        if not rows:
+            return 0
+        with self.lock:
+            cur = self.con.executemany(
+                'UPDATE calls SET sid = ? WHERE uid = ? AND sid IS NULL', rows)
+            self.con.commit()
+        return cur.rowcount or 0
+
     def query_calls(self, start_ms, end_ms):
         with self.lock:
             rows = self.con.execute(
-                'SELECT uid, src, ts, model, pt, k, ct, rr, rid, dur FROM calls '
+                'SELECT uid, src, ts, model, pt, k, ct, rr, rid, dur, sid FROM calls '
                 'WHERE ts >= ? AND ts < ? ORDER BY ts', (start_ms, end_ms)).fetchall()
         return [{'i': r[0][2:], 'src': r[1], 't': r[2], 'm': r[3], 'p': r[4], 'k': r[5],
-                 'c': r[6], 'r': r[7], 'q': r[8], 'd': r[9]} for r in rows]
+                 'c': r[6], 'r': r[7], 'q': r[8], 'd': r[9], 'sid': r[10]} for r in rows]
 
     def sync_credits(self, rows):
         if not rows:
@@ -827,17 +842,33 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
                                'title': sess.get('title') or '',
                                'tokens': rid_tok.get(c['rid'], 0)})
 
-    # 任务统计：按请求聚合（同一任务跨模型合并，不拆分），列口径与模型明细一致
+    # 任务统计：按会话合并（同一连续任务的多个请求与模型都不拆分），列口径与模型明细一致
+    # rid → sid：优先取日志记录的会话归属，辅以积分表
+    rid_sid = {}
+    for r in mid_best.values():
+        q = r.get('q')
+        if q and r.get('sid') and q not in rid_sid:
+            rid_sid[q] = r['sid']
+    for c in credit_rows:
+        rid_sid.setdefault(c['rid'], c['sid'])
+    rid_cr = {c['rid']: c['cr'] for c in credit_rows}
+
     task_agg = {}
     for r in mid_best.values():
         q = r.get('q')
-        if not q:
-            continue
-        t = task_agg.get(q)
+        sid = rid_sid.get(q) if q else None
+        if not sid and r.get('sid'):
+            sid = r['sid']           # 无 rid 但有会话归属的调用，直接按会话归入
+        if not sid:
+            if not q:
+                continue             # 既无请求又无会话：无法归属
+            sid = 'R:' + q           # 仅有请求记录：按单请求独立成行
+        t = task_agg.get(sid)
         if t is None:
-            t = task_agg[q] = {'rid': q, 'calls': 0, 'p': 0, 'k': 0, 'c': 0,
-                               'dur': 0, 'c_dur': 0, 'cost': 0.0,
-                               'first': r['t'], 'last': r['t'], 'models': set()}
+            t = task_agg[sid] = {'key': sid, 'calls': 0, 'p': 0, 'k': 0, 'c': 0,
+                                 'dur': 0, 'c_dur': 0, 'cost': 0.0,
+                                 'first': r['t'], 'last': r['t'],
+                                 'models': set(), 'reqs': set()}
         t['calls'] += 1
         t['p'] += r['p']
         t['k'] += r['k']
@@ -855,24 +886,28 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
         if r['t'] > t['last']:
             t['last'] = r['t']
         t['models'].add(r['m'])
+        t['reqs'].add(q)
 
     task_stats = []
     for t in task_agg.values():
-        if not (start_ms <= t['first'] < end_ms):
+        if not (start_ms <= t['last'] < end_ms):
             continue
-        meta = credit_rid.get(t['rid'])
-        sess = credit_store.sessions.get(meta['sid']) if meta else None
+        key = t['key']
+        is_sess = not key.startswith('R:')
+        sess = credit_store.sessions.get(key) if is_sess else None
+        credits_sum = sum(rid_cr.get(q, 0.0) for q in t['reqs'])
         task_stats.append({
-            'rid': t['rid'][:12],
-            't': t['first'], 'last': t['last'],
+            'sid': key[:8] if is_sess else key[2:14],
+            't': t['last'], 'first': t['first'],
             'title': (sess or {}).get('title') or '',
             'models': sorted(t['models']),
+            'reqs': len(t['reqs']),
             'calls': t['calls'],
             'p': t['p'] - t['k'], 'k': t['k'], 'c': t['c'],
             'total': t['p'] + t['c'],
             'speed': round(t['c_dur'] / (t['dur'] / 1000.0), 1) if t['dur'] else None,
             'rate': (t['k'] / t['p']) if t['p'] else 0.0,
-            'credits': round(meta['cr'], 4) if meta else 0.0,
+            'credits': round(credits_sum, 4) if credits_sum else 0.0,
             'cost': round(t['cost'], 4),
         })
     task_stats.sort(key=lambda x: -x['t'])
@@ -1076,12 +1111,13 @@ def main():
     ARCHIVE = Archive()
     n_new = ARCHIVE.sync_calls(INDEX.records, LOGS.records)
     n_bf = ARCHIVE.backfill_durations(INDEX.records)   # 历史记录回填耗时（一次性迁移）
+    n_bf_sid = ARCHIVE.backfill_sids(LOGS.records)     # 历史记录回填会话（一次性迁移）
     CREDITS = CreditStore()
     ARCHIVE.sync_credits(CREDITS.rows)
     print(f'  索引完成: {len(INDEX.by_file)} 个 trace 文件, {len(INDEX.records)} 条调用记录')
     print(f'  日志索引: {len(LOGS.by_file)} 个日志文件, {len(LOGS.records)} 条上报记录')
-    print(f'  归档: 本次新入库 {n_new} 条，回填耗时 {n_bf} 条，累计 {ARCHIVE.synced_calls} 条调用 / '
-          f'{len(ARCHIVE.query_credits())} 条积分')
+    print(f'  归档: 本次新入库 {n_new} 条，回填耗时 {n_bf} 条 / 会话 {n_bf_sid} 条，'
+          f'累计 {ARCHIVE.synced_calls} 条调用 / {len(ARCHIVE.query_credits())} 条积分')
     print(f'  积分记录: {len(CREDITS.rows)} 条' + (f' (DB 错误: {CREDITS.err})' if CREDITS.err else ''))
     t = threading.Thread(target=refresh_loop, daemon=True)
     t.start()
