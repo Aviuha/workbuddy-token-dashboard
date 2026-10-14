@@ -251,7 +251,7 @@ def parse_trace_file(path):
                 rid = None
         recs.append({
             't': t, 'm': model or 'unknown', 'p': p, 'c': c, 'k': k, 'r': r, 'q': rid,
-            'i': resp_id,
+            'i': resp_id, 'd': int(sp.get('duration') or 0) or None,
         })
     return recs
 
@@ -273,7 +273,7 @@ class UsageIndex:
         try:
             with open(CACHE_FILE, 'r', encoding='utf-8') as fh:
                 data = json.load(fh)
-            if data.get('v') != 2:
+            if data.get('v') != 3:
                 self.by_file = {}
                 return
             self.by_file = data.get('files', {})
@@ -285,7 +285,7 @@ class UsageIndex:
             os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
             tmp = CACHE_FILE + '.tmp'
             with open(tmp, 'w', encoding='utf-8') as fh:
-                json.dump({'v': 2, 'files': self.by_file, 'saved': int(time.time() * 1000)}, fh)
+                json.dump({'v': 3, 'files': self.by_file, 'saved': int(time.time() * 1000)}, fh)
             os.replace(tmp, CACHE_FILE)
         except Exception:
             pass
@@ -499,6 +499,9 @@ class Archive:
             c.execute('''CREATE TABLE IF NOT EXISTS calls (
                 uid TEXT PRIMARY KEY, src TEXT, ts INTEGER, model TEXT,
                 pt INTEGER, k INTEGER, ct INTEGER, rr INTEGER, rid TEXT)''')
+            cols = {row[1] for row in c.execute('PRAGMA table_info(calls)')}
+            if 'dur' not in cols:      # v2 迁移：新增调用耗时（毫秒）
+                c.execute('ALTER TABLE calls ADD COLUMN dur INTEGER')
             c.execute('CREATE INDEX IF NOT EXISTS idx_calls_ts ON calls(ts)')
             c.execute('''CREATE TABLE IF NOT EXISTS credits (
                 rid TEXT PRIMARY KEY, cr REAL, sid TEXT, t INTEGER,
@@ -515,30 +518,44 @@ class Archive:
             if uid in self.known:
                 continue
             self.known.add(uid)
-            pending.append((uid, 'trace', r['t'], r['m'], r['p'], r['k'], r['c'], r['r'], r.get('q')))
+            pending.append((uid, 'trace', r['t'], r['m'], r['p'], r['k'], r['c'], r['r'],
+                            r.get('q'), r.get('d')))
         for r in log_recs:
             uid = 'l:' + (r.get('mid') or ('%d|%s|%d|%d' % (r['t'], r['m'], r['pt'], r['tt'])))
             if uid in self.known:
                 continue
             self.known.add(uid)
-            pending.append((uid, 'log', r['t'], r['m'], r['pt'], 0, r['tt'] - r['pt'], 0, r.get('q')))
+            pending.append((uid, 'log', r['t'], r['m'], r['pt'], 0, r['tt'] - r['pt'], 0,
+                            r.get('q'), None))
         if not pending:
             return 0
         with self.lock:
             self.con.executemany(
-                'INSERT OR IGNORE INTO calls (uid, src, ts, model, pt, k, ct, rr, rid) '
-                'VALUES (?,?,?,?,?,?,?,?,?)', pending)
+                'INSERT OR IGNORE INTO calls (uid, src, ts, model, pt, k, ct, rr, rid, dur) '
+                'VALUES (?,?,?,?,?,?,?,?,?,?)', pending)
             self.con.commit()
         self.synced_calls += len(pending)
         return len(pending)
 
+    def backfill_durations(self, trace_recs):
+        """一次性迁移：为已归档但缺耗时的 trace 记录回填 dur（幂等）"""
+        rows = [(r['d'], 't:' + r['i']) for r in trace_recs
+                if r.get('i') and r.get('d')]
+        if not rows:
+            return 0
+        with self.lock:
+            cur = self.con.executemany(
+                'UPDATE calls SET dur = ? WHERE uid = ? AND dur IS NULL', rows)
+            self.con.commit()
+        return cur.rowcount or 0
+
     def query_calls(self, start_ms, end_ms):
         with self.lock:
             rows = self.con.execute(
-                'SELECT src, ts, model, pt, k, ct, rr, rid FROM calls WHERE ts >= ? AND ts < ? ORDER BY ts',
-                (start_ms, end_ms)).fetchall()
+                'SELECT src, ts, model, pt, k, ct, rr, rid, dur FROM calls '
+                'WHERE ts >= ? AND ts < ? ORDER BY ts', (start_ms, end_ms)).fetchall()
         return [{'src': r[0], 't': r[1], 'm': r[2], 'p': r[3], 'k': r[4],
-                 'c': r[5], 'r': r[6], 'q': r[7]} for r in rows]
+                 'c': r[5], 'r': r[6], 'q': r[7], 'd': r[8]} for r in rows]
 
     def sync_credits(self, rows):
         if not rows:
@@ -721,7 +738,8 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
             kpi['cost'] += cost
         m = models.setdefault(r['m'], {'m': r['m'], 'calls': 0, 'p': 0, 'k': 0, 'c': 0,
                                        'reason': 0, 'credits': 0.0, 'credit_reqs': 0,
-                                       'cost': 0.0, 'first': r['t'], 'last': r['t'], 'p_cov': 0})
+                                       'cost': 0.0, 'first': r['t'], 'last': r['t'], 'p_cov': 0,
+                                       'out_dur': 0, 'out_tok': 0})
         m['calls'] += 1
         m['p'] += r['p']
         m['k'] += r['k']
@@ -730,6 +748,9 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
         m['cost'] += cost
         if not r.get('supp'):
             m['p_cov'] += r['p']
+        if r.get('d'):      # 生成速度：仅统计有耗时记录的调用（输出 tokens ÷ 生成时长）
+            m['out_dur'] += r['d']
+            m['out_tok'] += r['c']
         m['first'] = min(m['first'], r['t'])
         m['last'] = max(m['last'], r['t'])
         tr = trend.setdefault(r['m'], {'p': [0] * n_buckets, 'k': [0] * n_buckets, 'c': [0] * n_buckets})
@@ -798,7 +819,8 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
         model_list.append({
             'm': '未归属', 'calls': 0, 'p': 0, 'k': 0, 'c': 0, 'total': 0,
             'reason': 0, 'credits': credit_by_model['未归属'], 'credit_reqs': n_unassigned,
-            'cost': 0.0, 'first': None, 'last': None, 'p_cov': 0,
+            'cost': 0.0, 'first': None, 'last': None, 'p_cov': 0, 'speed': None,
+            'out_dur': 0, 'out_tok': 0,
         })
     credits_total_all = sum(c['cr'] for c in credit_rows)
     n_id = len([c for c in credit_rows if c['tsrc'] == 'id'])
@@ -835,6 +857,7 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
             'credits': round(m['credits'], 4), 'credit_reqs': m['credit_reqs'],
             'cost': round(m['cost'], 4) if m['m'] in PRICING else None,
             'price': PRICING.get(m['m']),
+            'speed': round(m.get('out_tok', 0) / (m.get('out_dur', 0) / 1000.0), 1) if m.get('out_dur') else None,
             'first': m['first'], 'last': m['last'],
         } for m in model_list],
         'credit_trend': {'buckets': buckets, 'by_model': credit_trend,
@@ -976,11 +999,12 @@ def main():
     LOGS = LogIndex()
     ARCHIVE = Archive()
     n_new = ARCHIVE.sync_calls(INDEX.records, LOGS.records)
+    n_bf = ARCHIVE.backfill_durations(INDEX.records)   # 历史记录回填耗时（一次性迁移）
     CREDITS = CreditStore()
     ARCHIVE.sync_credits(CREDITS.rows)
     print(f'  索引完成: {len(INDEX.by_file)} 个 trace 文件, {len(INDEX.records)} 条调用记录')
     print(f'  日志索引: {len(LOGS.by_file)} 个日志文件, {len(LOGS.records)} 条上报记录')
-    print(f'  归档: 本次新入库 {n_new} 条，累计 {ARCHIVE.synced_calls} 条调用 / '
+    print(f'  归档: 本次新入库 {n_new} 条，回填耗时 {n_bf} 条，累计 {ARCHIVE.synced_calls} 条调用 / '
           f'{len(ARCHIVE.query_credits())} 条积分')
     print(f'  积分记录: {len(CREDITS.rows)} 条' + (f' (DB 错误: {CREDITS.err})' if CREDITS.err else ''))
     t = threading.Thread(target=refresh_loop, daemon=True)

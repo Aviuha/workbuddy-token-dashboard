@@ -166,6 +166,7 @@
     display: inline-block; padding: 1px 7px; border-radius: 99px; font-size: 11px;
     background: rgba(52,211,153,.12); color: var(--green);
   }
+  .u { font-size: 10px; color: var(--text-3); margin-left: 3px; }
 
   /* ---------- 最近请求 ---------- */
   .req-list { max-height: 330px; overflow-y: auto; }
@@ -340,6 +341,7 @@
               <th class="num">缓存读取</th>
               <th class="num">输出</th>
               <th class="num">总计</th>
+              <th class="num" title="生成速度 = 输出 tokens ÷ 生成耗时（仅统计有耗时记录的调用）">速度</th>
               <th class="num">命中率</th>
               <th class="num">积分</th>
               <th class="num">等价 API</th>
@@ -817,7 +819,7 @@ function renderCredit(d) {
 function renderTable(d) {
   const tb = $('tbody-models');
   if (!d.models.length) {
-    tb.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-3);padding:22px">该时间段暂无数据</td></tr>';
+    tb.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-3);padding:22px">该时间段暂无数据</td></tr>';
     $('table-sub').textContent = '';
     return;
   }
@@ -844,6 +846,7 @@ function renderTable(d) {
       <td class="num">${isAgg ? dash : fmtInt(m.k)}</td>
       <td class="num">${isAgg ? dash : fmtInt(m.c)}</td>
       <td class="num">${isAgg ? dash : fmtInt(m.total)}</td>
+      <td class="num"${!isAgg ? ' title="输出 tokens ÷ 生成耗时，仅统计有耗时记录的调用"' : ''}>${isAgg || m.speed == null ? dash : `${m.speed.toFixed(1)}<span class="u">tok/s</span>`}</td>
       <td class="num">${isAgg ? dash : `<span class="rate-pill">${m.rate ? fmtPct(m.rate) : '—'}</span>`}</td>
       <td class="num" style="color:var(--amber);${isAgg ? 'cursor:help' : ''}" ${isAgg ? `title="${hint}"` : ''}>${m.credits ? m.credits.toFixed(2) : '—'}</td>
       <td class="num" style="color:${m.cost != null ? 'var(--green)' : 'var(--text-3)'};cursor:${m.cost != null ? 'help' : 'default'}" title="${hint.replace(/"/g, '&quot;')}">${fmtCNY(m.cost)}</td>
