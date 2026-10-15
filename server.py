@@ -167,8 +167,11 @@ def load_pricing_overrides():
         return {}
 
 
+COLOR_RE = re.compile(r'^#[0-9a-fA-F]{6}$')
+
+
 def sanitize_overrides(ov):
-    """只保留四项数值字段：非负、上限 1e6、模型名长度 ≤64"""
+    """只保留合法字段：四项数值（非负、上限 1e6）与颜色（#rrggbb）、模型名长度 ≤64"""
     clean = {}
     if not isinstance(ov, dict):
         return clean
@@ -184,24 +187,38 @@ def sanitize_overrides(ov):
                         p[k] = v
                 except (TypeError, ValueError):
                     pass
+        c = patch.get('color')
+        if isinstance(c, str) and COLOR_RE.match(c.strip()):
+            p['color'] = c.strip().lower()
         if p:
             clean[mid] = p
     return clean
 
 
 def build_pricing(overrides):
-    """内置默认价 ⊕ 用户调整（被调整的模型标记为「手动调整」，也可为未定价模型新增）"""
+    """内置默认价 ⊕ 用户调整（被调整的模型标记为「手动调整」，也可为未定价模型新增）
+    纯颜色覆盖不产生价格条目（保持原价/未定价）"""
     pricing = {k: dict(v) for k, v in PRICING_DEFAULTS.items()}
     for mid, patch in (overrides or {}).items():
+        price_fields = {k: v for k, v in patch.items() if k in ('hit', 'miss', 'out', 'peak_x')}
+        if not price_fields:
+            continue
         base = dict(pricing.get(mid) or {'hit': 0.0, 'miss': 0.0, 'out': 0.0, 'peak_x': 1.0})
-        base.update(patch)
+        base.update(price_fields)
         base['kind'] = 'custom'
         base['src'] = '手动调整的价格'
         pricing[mid] = base
     return pricing
 
 
+def build_colors(overrides):
+    """从覆盖项提取自选颜色 {model: '#rrggbb'}"""
+    return {mid: patch['color'] for mid, patch in (overrides or {}).items()
+            if isinstance(patch, dict) and patch.get('color')}
+
+
 PRICING = build_pricing(load_pricing_overrides())
+MODEL_COLOR_OVERRIDES = build_colors(load_pricing_overrides())
 
 
 def is_peak_cn(ms):
@@ -1071,6 +1088,7 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
             'credits': round(m['credits'], 4), 'credit_reqs': m['credit_reqs'],
             'cost': round(m['cost'], 4) if m['m'] in PRICING else None,
             'price': PRICING.get(m['m']),
+            'color': MODEL_COLOR_OVERRIDES.get(m['m']),
             'speed': round(m.get('out_tok', 0) / (m.get('out_dur', 0) / 1000.0), 1) if m.get('out_dur') else None,
             'first': m['first'], 'last': m['last'],
         } for m in model_list],
@@ -1229,7 +1247,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, {'error': '请求体不是合法 JSON'})
             return
         if u.path == '/api/pricing':
-            global PRICING
+            global PRICING, MODEL_COLOR_OVERRIDES
             ov = sanitize_overrides(body.get('overrides') or {})
             try:
                 os.makedirs(os.path.dirname(PRICING_OVERRIDES_FILE), exist_ok=True)
@@ -1241,6 +1259,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, {'error': str(e)})
                 return
             PRICING = build_pricing(ov)
+            MODEL_COLOR_OVERRIDES = build_colors(ov)
             self._send(200, {'ok': True, 'count': len(ov)})
             return
         self._send(404, {'error': 'not found'})

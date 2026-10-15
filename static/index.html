@@ -200,7 +200,7 @@
   .modal-foot { padding: 10px 18px 14px; display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
   .modal-foot .msg { flex: 1; font-size: 11px; color: var(--red, #f87171); }
   .pm-row {
-    display: grid; grid-template-columns: 1fr 88px 88px 88px 64px 66px; gap: 6px;
+    display: grid; grid-template-columns: 1fr 42px 88px 88px 88px 64px 66px; gap: 6px;
     align-items: center; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 12px;
   }
   .pm-row.pm-head { color: var(--text-3); font-size: 10.5px; position: sticky; top: 0; background: var(--panel); z-index: 1; }
@@ -208,6 +208,9 @@
     width: 100%; padding: 4px 6px; font-size: 12px; font-family: inherit;
     background: var(--bg); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; text-align: right; font-variant-numeric: tabular-nums;
+  }
+  .pm-row input[type="color"] {
+    padding: 1px 2px; height: 23px; cursor: pointer; text-align: left;
   }
   .pm-row input:focus { outline: none; border-color: var(--accent); }
   .pm-row .mod { color: var(--accent); font-size: 9px; margin-left: 5px; vertical-align: 1px; }
@@ -476,12 +479,16 @@ const MODEL_COLORS = {
   'hy3': '#5eead4',
   'minimax-m3': '#e879f9',
   'space-bunny': '#a78bfa',
+  'step-5-preview': '#f87171',
+  'wb-lite': '#8a94a6',
   '未归属': '#5d6b80',
 };
 const FALLBACK_COLORS = ['#60a5fa','#f472b6','#facc15','#4ade80','#c084fc','#fb923c','#38bdf8','#eab308'];
 let fallbackIdx = 0;
 const modelColorMap = {};
+const customColors = {};   // 用户在「调整价格」弹窗里为模型自选的颜色（服务端下发）
 function modelColor(m) {
+  if (customColors[m]) return customColors[m];
   if (MODEL_COLORS[m]) return MODEL_COLORS[m];
   if (!modelColorMap[m]) { modelColorMap[m] = FALLBACK_COLORS[fallbackIdx++ % FALLBACK_COLORS.length]; }
   return modelColorMap[m];
@@ -651,6 +658,11 @@ let renderCount = 0;
 function render(d) {
   state.lastData = d;
   const k = d.kpi;
+  // 同步用户自选颜色（服务端随 models 下发；无则清除，回落到内置色板）
+  (d.models || []).forEach(x => {
+    if (x.color) customColors[x.m] = x.color;
+    else delete customColors[x.m];
+  });
 
   $('k-total').textContent = fmtNum(k.total);
   $('k-total-sub').innerHTML = `输入 <b>${fmtNum(k.prompt)}</b> ＋ 输出 <b>${fmtNum(k.completion)}</b>`;
@@ -1007,20 +1019,27 @@ function pmVal(mid, k) {
   return '';
 }
 
+function pmColor(mid) {
+  const ov = pmState.overrides[mid];
+  if (ov && ov.color) return ov.color;
+  return MODEL_COLORS[mid] || '#6b7280';
+}
+
 function renderPM() {
   const ids = Array.from(new Set([...Object.keys(pmState.defaults), ...pmState.models])).sort();
   const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
-  const head = `<div class="pm-row pm-head"><span>模型</span><span style="text-align:right">缓存命中</span><span style="text-align:right">未命中</span><span style="text-align:right">输出</span><span style="text-align:right" title="高峰时段倍率（如 DeepSeek 峰谷价 ×2）">高峰×</span><span></span></div>`;
+  const head = `<div class="pm-row pm-head"><span>模型</span><span title="自选颜色（图表与列表中一致）">颜色</span><span style="text-align:right">缓存命中</span><span style="text-align:right">未命中</span><span style="text-align:right">输出</span><span style="text-align:right" title="高峰时段倍率（如 DeepSeek 峰谷价 ×2）">高峰×</span><span></span></div>`;
   const rows = ids.map(mid => {
     const modified = !!pmState.overrides[mid];
     const name = esc(mid);
     return `<div class="pm-row" data-mid="${name}">
       <span>${name}${modified ? '<span class="mod" title="已手动调整">●</span>' : ''}</span>
+      <input type="color" data-k="color" value="${pmColor(mid)}" title="自选颜色（保持默认则为内置色）">
       <input type="number" step="any" min="0" data-k="hit" value="${pmVal(mid, 'hit')}" placeholder="—">
       <input type="number" step="any" min="0" data-k="miss" value="${pmVal(mid, 'miss')}" placeholder="—">
       <input type="number" step="any" min="0" data-k="out" value="${pmVal(mid, 'out')}" placeholder="—">
       <input type="number" step="any" min="1" data-k="peak_x" value="${pmVal(mid, 'peak_x')}" placeholder="1">
-      <button class="pm-reset" data-reset="${name}" ${modified ? '' : 'disabled'} title="清除手动价格，回到内置官方价">恢复默认</button>
+      <button class="pm-reset" data-reset="${name}" ${modified ? '' : 'disabled'} title="清除手动价格与颜色，回到内置默认">恢复默认</button>
     </div>`;
   });
   $('pm-rows').innerHTML = head + rows.join('');
@@ -1042,6 +1061,13 @@ function pmSyncRow(row, mid) {
 async function savePricing() {
   for (const [mid, ov] of Object.entries(pmState.overrides)) {
     for (const [k, v] of Object.entries(ov)) {
+      if (k === 'color') {
+        if (!/^#[0-9a-f]{6}$/i.test(String(v))) {
+          $('pm-msg').textContent = `「${mid}」的颜色格式不合法`;
+          return;
+        }
+        continue;
+      }
       const n = Number(v);
       if (!Number.isFinite(n) || n < 0 || n > 1e6) {
         $('pm-msg').textContent = `「${mid}」的 ${k} 数值不合法`;
@@ -1242,10 +1268,12 @@ function boot() {
     const k = inp.dataset.k;
     const def = pmState.defaults[mid] || {};
     const v = inp.value.trim();
-    const dv = def[k] != null ? String(def[k]) : '';
+    // 颜色的「默认」= 内置色板；数值的「默认」= 内置价格
+    const dv = k === 'color' ? (MODEL_COLORS[mid] || '')
+                             : (def[k] != null ? String(def[k]) : '');
     const ov = pmState.overrides[mid] || {};
     if (v === '' || v === dv) delete ov[k];
-    else ov[k] = Number(v);
+    else ov[k] = k === 'color' ? v : Number(v);
     if (Object.keys(ov).length) pmState.overrides[mid] = ov;
     else delete pmState.overrides[mid];
     pmSyncRow(row, mid);
