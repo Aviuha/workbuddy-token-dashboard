@@ -68,7 +68,7 @@ python3 server.py
 
 | 数据 | 来源 | 服务端采集节奏 |
 |---|---|---|
-| token 明细（模型、输入、输出、缓存命中） | `~/.workbuddy/traces/<pid>/trace_*.json` | 增量扫描（随刷新设置 0.6–5 秒） |
+| token 明细（模型、输入、输出、缓存命中） | `~/.workbuddy/traces/<pid>/trace_*.json` 与 `trace_*.jsonl`（新旧两种格式，均支持） | 增量扫描（随刷新设置 0.6–5 秒） |
 | 调用上报（补充源） | `~/.workbuddy/logs/<date>/*.log` | 周期扫描（≥12 秒） |
 | 积分（按每次用户请求记账） | `~/.workbuddy/workbuddy.db` 的 `session_usage` 表 | 周期读取（≥2 秒） |
 

@@ -4,7 +4,7 @@
 WorkBuddy Token 用量看板 — 本地实时服务（仅用 Python 标准库）
 
 数据源:
-  1) ~/.workbuddy/traces/<pid>/trace_*.json
+  1) ~/.workbuddy/traces/<pid>/trace_*.json（旧格式）与 trace_*.jsonl（新格式，事件流）
      每次模型调用的 token 明细（模型、输入/输出 token、缓存命中 token）
   2) ~/.workbuddy/workbuddy.db  session_usage 表
      按用户请求记录的积分消耗（credit_json: {conversationRequestId: credits}）
@@ -299,8 +299,89 @@ def gen_bucket_starts(start_ms, end_ms, unit):
     return starts
 
 
+def _extract_generation_rec(sp):
+    """从 generation span 提取记录（.json 与 .jsonl 两种格式通用）；无 usage 返回 None"""
+    t = parse_iso_ms(sp.get('startedAt'))
+    if t is None:
+        return None
+    to = sp.get('toolOutput')
+    if not to:
+        return None
+    try:
+        out = json.loads(to)
+    except Exception:
+        return None
+    items = out if isinstance(out, list) else [out]
+    p = c = k = r = 0
+    model = None
+    resp_id = None
+    got = False
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        u = it.get('usage') or {}
+        if not u:
+            continue
+        got = True
+        model = model or it.get('model')
+        resp_id = resp_id or it.get('id')
+        p += int(u.get('prompt_tokens') or 0)
+        c += int(u.get('completion_tokens') or 0)
+        k += int(((u.get('prompt_tokens_details') or {}).get('cached_tokens')) or 0)
+        r += int(((u.get('completion_tokens_details') or {}).get('reasoning_tokens')) or 0)
+    if not got:
+        return None
+    if k > p:
+        k = p
+    # requestId：仅当 toolInput 被截断时，最后可见的 id 可能来自历史消息，
+    # 用「id 内嵌时间戳与 span 时间是否接近」做校验，避免错配。
+    rid = None
+    ti = sp.get('toolInput') or ''
+    cand = RID_RE.findall(ti)
+    if cand:
+        rid = cand[-1]
+        idt = rid_time_of(rid)
+        if idt is None or abs(t - idt) > RID_TIME_TOLERANCE:
+            rid = None
+    return {
+        't': t, 'm': model or 'unknown', 'p': p, 'c': c, 'k': k, 'r': r, 'q': rid,
+        'i': resp_id, 'd': int(sp.get('duration') or 0) or None,
+    }
+
+
+def _parse_trace_jsonl(path):
+    """解析 .jsonl 事件流 trace：每行一个事件，取 span_end 的 generation span"""
+    try:
+        with open(path, 'r', encoding='utf-8', errors='ignore') as fh:
+            txt = fh.read()
+    except Exception:
+        return None
+    if '"generation"' not in txt:
+        return []
+    recs = []
+    for ln in txt.split('\n'):
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            d = json.loads(ln)
+        except Exception:
+            continue   # 单行不完整（正在追加写入）或损坏，跳过即可
+        if not isinstance(d, dict) or d.get('type') != 'span_end':
+            continue
+        sp = d.get('span')
+        if not isinstance(sp, dict) or sp.get('type') != 'generation':
+            continue
+        rec = _extract_generation_rec(sp)
+        if rec:
+            recs.append(rec)
+    return recs
+
+
 def parse_trace_file(path):
-    """解析单个 trace 文件，返回记录列表；None 表示暂时不可读（正在写入等）"""
+    """解析单个 trace 文件（.json 旧格式 / .jsonl 事件流新格式），返回记录列表；None 表示暂时不可读"""
+    if path.endswith('.jsonl'):
+        return _parse_trace_jsonl(path)
     try:
         with open(path, 'r', encoding='utf-8', errors='ignore') as fh:
             txt = fh.read()
@@ -319,52 +400,9 @@ def parse_trace_file(path):
     for sp in spans:
         if not isinstance(sp, dict) or sp.get('type') != 'generation':
             continue
-        t = parse_iso_ms(sp.get('startedAt'))
-        if t is None:
-            continue
-        to = sp.get('toolOutput')
-        if not to:
-            continue
-        try:
-            out = json.loads(to)
-        except Exception:
-            continue
-        items = out if isinstance(out, list) else [out]
-        p = c = k = r = 0
-        model = None
-        resp_id = None
-        got = False
-        for it in items:
-            if not isinstance(it, dict):
-                continue
-            u = it.get('usage') or {}
-            if not u:
-                continue
-            got = True
-            model = model or it.get('model')
-            resp_id = resp_id or it.get('id')
-            p += int(u.get('prompt_tokens') or 0)
-            c += int(u.get('completion_tokens') or 0)
-            k += int(((u.get('prompt_tokens_details') or {}).get('cached_tokens')) or 0)
-            r += int(((u.get('completion_tokens_details') or {}).get('reasoning_tokens')) or 0)
-        if not got:
-            continue
-        if k > p:
-            k = p
-        # requestId：仅当 toolInput 被截断时，最后可见的 id 可能来自历史消息，
-        # 用「id 内嵌时间戳与 span 时间是否接近」做校验，避免错配。
-        rid = None
-        ti = sp.get('toolInput') or ''
-        cand = RID_RE.findall(ti)
-        if cand:
-            rid = cand[-1]
-            idt = rid_time_of(rid)
-            if idt is None or abs(t - idt) > RID_TIME_TOLERANCE:
-                rid = None
-        recs.append({
-            't': t, 'm': model or 'unknown', 'p': p, 'c': c, 'k': k, 'r': r, 'q': rid,
-            'i': resp_id, 'd': int(sp.get('duration') or 0) or None,
-        })
+        rec = _extract_generation_rec(sp)
+        if rec:
+            recs.append(rec)
     return recs
 
 
@@ -416,7 +454,8 @@ class UsageIndex:
             if not os.path.isdir(sub):
                 continue
             try:
-                sub_files = [f for f in os.listdir(sub) if f.startswith('trace_') and f.endswith('.json')]
+                sub_files = [f for f in os.listdir(sub)
+                             if f.startswith('trace_') and (f.endswith('.json') or f.endswith('.jsonl'))]
             except Exception:
                 continue
             for fn in sub_files:
