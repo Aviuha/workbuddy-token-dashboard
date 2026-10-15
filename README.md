@@ -40,7 +40,9 @@ WORKBUDDY_HOME="D:\path\to\.workbuddy" python server.py   # Windows PowerShell: 
 
 ```bash
 chmod +x start.sh
-./start.sh
+./start.sh           # 启动
+./start.sh restart   # 重启（修改后端代码后重新加载）
+./start.sh stop      # 停止
 ```
 
 **Windows**
@@ -58,7 +60,8 @@ python3 server.py
 
 - 启动失败：查看同目录 `server.log`
 - 端口被占用：修改 `server.py` 顶部 `PORT`（同时改启动脚本中的端口）
-- 停止服务：macOS/Linux 执行 `lsof -ti :8899 | xargs kill`；Windows 关闭服务窗口
+- 停止服务：macOS/Linux 执行 `./start.sh stop`；Windows 关闭服务窗口
+- 修改后端代码后：执行 `./start.sh restart` 重新加载（Python 进程不会热更新已加载的代码）
 - 页面没有数据：属正常——看板读取的是**本机** `~/.workbuddy/` 的使用记录
 
 ## 数据来源
