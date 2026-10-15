@@ -114,7 +114,8 @@ TS_MIN, TS_MAX = 1577836800000, 1893456000000   # 2020-01-01 ~ 2030-01-01
 #   来源仅采用各厂商官方定价文档；官方未公布定价的模型不在此表（该列显示 —）
 #   hit  输入·缓存命中  miss 输入·缓存未命中  out 输出
 #   peak_x 高峰倍率（DeepSeek 峰谷定价：闲时价为基准，高峰翻倍，其余模型无峰谷）
-PRICING = {
+#   页面「调整价格」按钮可覆盖/新增价格，覆盖项持久化在 data/pricing-overrides.json
+PRICING_DEFAULTS = {
     'deepseek-v4.1-flash': {
         'hit': 0.02, 'miss': 1.0, 'out': 4.0, 'peak_x': 2.0, 'kind': 'official',
         'src': 'DeepSeek 官方定价（deepseek-flash）',
@@ -152,6 +153,55 @@ PRICING = {
         'src': '阶跃星辰官方（缓存命中价 2026-10-14 起为 0.70）',
     },
 }
+
+# ---- 价格手动调整（覆盖项持久化到 data/pricing-overrides.json）----
+PRICING_OVERRIDES_FILE = os.path.join(BASE, 'data', 'pricing-overrides.json')
+
+
+def load_pricing_overrides():
+    try:
+        with open(PRICING_OVERRIDES_FILE, encoding='utf-8') as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def sanitize_overrides(ov):
+    """只保留四项数值字段：非负、上限 1e6、模型名长度 ≤64"""
+    clean = {}
+    if not isinstance(ov, dict):
+        return clean
+    for mid, patch in ov.items():
+        if not isinstance(mid, str) or len(mid) > 64 or not isinstance(patch, dict):
+            continue
+        p = {}
+        for k in ('hit', 'miss', 'out', 'peak_x'):
+            if k in patch:
+                try:
+                    v = float(patch[k])
+                    if 0 <= v <= 1e6:
+                        p[k] = v
+                except (TypeError, ValueError):
+                    pass
+        if p:
+            clean[mid] = p
+    return clean
+
+
+def build_pricing(overrides):
+    """内置默认价 ⊕ 用户调整（被调整的模型标记为「手动调整」，也可为未定价模型新增）"""
+    pricing = {k: dict(v) for k, v in PRICING_DEFAULTS.items()}
+    for mid, patch in (overrides or {}).items():
+        base = dict(pricing.get(mid) or {'hit': 0.0, 'miss': 0.0, 'out': 0.0, 'peak_x': 1.0})
+        base.update(patch)
+        base['kind'] = 'custom'
+        base['src'] = '手动调整的价格'
+        pricing[mid] = base
+    return pricing
+
+
+PRICING = build_pricing(load_pricing_overrides())
 
 
 def is_peak_cn(ms):
@@ -619,6 +669,11 @@ class Archive:
                 'WHERE ts >= ? AND ts < ? ORDER BY ts', (start_ms, end_ms)).fetchall()
         return [{'i': r[0][2:], 'src': r[1], 't': r[2], 'm': r[3], 'p': r[4], 'k': r[5],
                  'c': r[6], 'r': r[7], 'q': r[8], 'd': r[9], 'sid': r[10]} for r in rows]
+
+    def distinct_models(self):
+        with self.lock:
+            return [r[0] for r in self.con.execute('SELECT DISTINCT model FROM calls')
+                    if r[0]]
 
     def sync_credits(self, rows):
         if not rows:
@@ -1132,6 +1187,19 @@ class Handler(BaseHTTPRequestHandler):
                 'db_error': CREDITS.err,
             })
             return
+        if u.path == '/api/pricing':
+            models_list = []
+            try:
+                models_list = ARCHIVE.distinct_models()
+            except Exception:
+                pass
+            self._send(200, {
+                'defaults': PRICING_DEFAULTS,
+                'overrides': load_pricing_overrides(),
+                'effective': PRICING,
+                'models': models_list,
+            })
+            return
         path = u.path
         if path == '/':
             path = '/index.html'
@@ -1150,6 +1218,32 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, data, MIME.get(ext, 'application/octet-stream'))
         except Exception:
             self._send(500, {'error': 'read fail'})
+
+    def do_POST(self):
+        u = urlparse(self.path)
+        try:
+            length = int(self.headers.get('Content-Length') or 0)
+            raw = self.rfile.read(length) if length else b'{}'
+            body = json.loads(raw.decode('utf-8') or '{}')
+        except Exception:
+            self._send(400, {'error': '请求体不是合法 JSON'})
+            return
+        if u.path == '/api/pricing':
+            global PRICING
+            ov = sanitize_overrides(body.get('overrides') or {})
+            try:
+                os.makedirs(os.path.dirname(PRICING_OVERRIDES_FILE), exist_ok=True)
+                tmp = PRICING_OVERRIDES_FILE + '.tmp'
+                with open(tmp, 'w', encoding='utf-8') as fh:
+                    json.dump(ov, fh, ensure_ascii=False, indent=1)
+                os.replace(tmp, PRICING_OVERRIDES_FILE)
+            except Exception as e:
+                self._send(500, {'error': str(e)})
+                return
+            PRICING = build_pricing(ov)
+            self._send(200, {'ok': True, 'count': len(ov)})
+            return
+        self._send(404, {'error': 'not found'})
 
 
 def main():
