@@ -126,6 +126,9 @@
   .kpi .value { font-size: 21px; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -.3px; white-space: nowrap; }
   .kpi .sub { font-size: 11px; color: var(--text-3); margin-top: 4px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .kpi .sub b { color: var(--text-2); font-weight: 500; }
+  /* 积分消耗副标：两个数值在窄卡片下允许整体换行（避免省略号截断） */
+  #k-credit-sub { white-space: normal; }
+  #k-credit-sub .cv-seg { white-space: nowrap; }
   .c-blue .value { color: var(--accent); }
   .c-green .value { color: var(--green); }
   .c-amber .value { color: var(--amber); }
@@ -512,6 +515,8 @@ function fmtCNY(v) {
   return '¥0';
 }
 const pad2 = n => String(n).padStart(2, '0');
+// 积分按套餐实付价折算：140 元 / 9000 积分（¥0.0156/积分）
+const CREDIT_CNY = 140 / 9000;
 function fmtClock(ms) {
   const d = new Date(ms);
   return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
@@ -673,7 +678,10 @@ function render(d) {
   $('k-out').textContent = fmtNum(k.completion);
   $('k-out-sub').innerHTML = k.reasoning ? `含推理 <b>${fmtNum(k.reasoning)}</b>` : ' (模型输出)';
   $('k-credit').textContent = k.credits.toFixed(2);
-  $('k-credit-sub').innerHTML = `等价 API <b>${fmtCNY(k.cost)}</b>`;
+  $('k-credit-sub').innerHTML =
+    `<span class="cv-seg">积分价值 <b>${fmtCNY(k.credits * CREDIT_CNY)}</b> ·</span> ` +
+    `<span class="cv-seg">等价 API <b>${fmtCNY(k.cost)}</b></span>`;
+  $('k-credit-sub').title = '积分价值：按 140 元 / 9000 积分套餐价折算（约 ¥0.0156/积分）；等价 API：同等用量按各厂商官方定价的费用';
   $('k-calls').textContent = fmtInt(k.calls);
   $('k-calls-sub').innerHTML = `时段内 <b>${d.meta.records_in_range}</b> 条记录`;
 
