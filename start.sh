@@ -78,7 +78,8 @@ stop_service() {
 }
 
 start_service() {
-  nohup "$PY" server.py > server.log 2>&1 &
+  # -u：无缓冲输出，启动信息与错误实时写入 server.log
+  nohup "$PY" -u server.py > server.log 2>&1 &
   if [ "$HAS_LSOF" = "1" ]; then
     i=0
     while [ "$i" -lt 24 ]; do    # 首启建索引需要几秒，最多等 12 秒
