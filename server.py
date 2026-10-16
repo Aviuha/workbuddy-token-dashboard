@@ -254,6 +254,9 @@ def rid_time_of(rid):
 # 系统调用的 request_type 标记：由平台自动发起、无真实任务归属，不参与任务统计。
 AUX_REQUEST_TYPES = {'security_reviewer', 'content_security_reviewer'}
 
+# 不参与看板统计的模型：WorkBuddy 内置轻量路由模型（系统内部调用，非用户实际使用的模型）
+EXCLUDED_MODELS = {'wb-lite'}
+
 
 def bucket_start_ms(ms, unit):
     dt = datetime.fromtimestamp(ms / 1000, LOCAL_TZ)
@@ -859,8 +862,10 @@ def credit_model_of(credit, rid_model, sessions):
 
 
 def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, now_ms):
-    # 归档库为唯一数据源（trace + 日志双源，按唯一键幂等去重后的全集）
-    all_recs = archive.query_calls(0, now_ms + 86400000)
+    # 归档库为唯一数据源（trace + 日志双源，按唯一键幂等去重后的全集）；
+    # 内置路由模型（wb-lite 等）不参与统计，在此统一剔除
+    all_recs = [r for r in archive.query_calls(0, now_ms + 86400000)
+                if r['m'] not in EXCLUDED_MODELS]
     recs = [r for r in all_recs if start_ms <= r['t'] < end_ms]
     trace_recs = [r for r in recs if r.get('src') != 'log']
     log_recs = [r for r in recs if r.get('src') == 'log']
@@ -1276,7 +1281,8 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == '/api/pricing':
             models_list = []
             try:
-                models_list = ARCHIVE.distinct_models()
+                models_list = [m for m in ARCHIVE.distinct_models()
+                               if m not in EXCLUDED_MODELS]
             except Exception:
                 pass
             self._send(200, {
