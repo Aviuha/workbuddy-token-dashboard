@@ -257,6 +257,9 @@ AUX_REQUEST_TYPES = {'security_reviewer', 'content_security_reviewer'}
 # 不参与看板统计的模型：WorkBuddy 内置轻量路由模型（系统内部调用，非用户实际使用的模型）
 EXCLUDED_MODELS = {'wb-lite'}
 
+# 跨源双胞胎配对的时间容差（毫秒）：同一次调用的 trace 与日志记录时间戳一致（实测差 0 秒）
+TWIN_TS_TOLERANCE = 10000
+
 
 def bucket_start_ms(ms, unit):
     dt = datetime.fromtimestamp(ms / 1000, LOCAL_TZ)
@@ -996,6 +999,7 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
 
     # 每请求总 token：同一调用的双源记录（trace/log）先合并——
     # trace 版优先（含缓存明细），rid / 会话 / 请求类型取任一版本非空（trace 常缺这些）。
+    # 先按 mid 合并同 ID 双源，再按「内容 + 时间」合并跨 ID 双胞胎（见下）。
     mid_best = {}
     for r in all_recs:
         mid = r.get('i')
@@ -1015,6 +1019,37 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
             base['sid'] = base.get('sid') or other.get('sid')
             base['rt'] = base.get('rt') or other.get('rt')
         mid_best[mid] = base
+
+    # 跨 ID 双胞胎合并：部分时期的同一调用在两侧的 ID 格式不同（如自带 Key 调用的
+    # UUID 型 response id 与 01a 型 message id），未能按 mid 合并——同一调用会以
+    # 日志版（带会话归属、无缓存数据、按全价）与 trace 版（带真实缓存）各计一次。
+    # 按「模型 + 输入 + 输出 + 时间邻近」配对：把日志版的请求/会话归属并入 trace 版，
+    # 移除日志版，避免任务统计重复计数与价格虚高。
+    twin_pool = {}
+    for mid, r in mid_best.items():
+        if r.get('src') == 'trace':
+            twin_pool.setdefault((r['m'], r['p'], r['c']), []).append(mid)
+    claimed = set()
+    drop_logs = []
+    for mid, r in mid_best.items():
+        if r.get('src') != 'log':
+            continue
+        cands = [m2 for m2 in twin_pool.get((r['m'], r['p'], r['c']), ())
+                 if m2 not in claimed
+                 and abs(mid_best[m2]['t'] - r['t']) <= TWIN_TS_TOLERANCE]
+        if not cands:
+            continue
+        best = min(cands, key=lambda m2: abs(mid_best[m2]['t'] - r['t']))
+        claimed.add(best)
+        tr = dict(mid_best[best])
+        tr['q'] = tr.get('q') or r.get('q')
+        tr['sid'] = tr.get('sid') or r.get('sid')
+        tr['rt'] = tr.get('rt') or r.get('rt')
+        mid_best[best] = tr
+        drop_logs.append(mid)
+    for mid in drop_logs:
+        del mid_best[mid]
+
     rid_tok = {}
     for r in mid_best.values():
         q = r.get('q')
