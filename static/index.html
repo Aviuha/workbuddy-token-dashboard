@@ -249,6 +249,21 @@
   }
   .pm-reset:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
   .pm-reset:disabled { opacity: .35; cursor: default; }
+  /* 设置弹窗：分区 */
+  .set-sec { padding: 4px 0 10px; }
+  .set-sec + .set-sec { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 12px; }
+  .set-sec-head { margin-bottom: 8px; }
+  .set-sec-head h4 { font-size: 12.5px; font-weight: 600; color: var(--text); margin-bottom: 2px; }
+  .set-sec-head .set-hint { font-size: 11px; color: var(--text-3); line-height: 1.5; display: block; }
+  .set-row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 12px; color: var(--text-2); }
+  .set-row input {
+    width: 96px; padding: 5px 8px; font-size: 12px; font-family: inherit;
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; text-align: right; font-variant-numeric: tabular-nums;
+  }
+  .set-row input:focus { outline: none; border-color: var(--accent); }
+  .set-sep { color: var(--text-3); }
+  .set-eq { color: var(--text-3); font-size: 11px; margin-left: 4px; }
   .btn-primary {
     padding: 6px 16px; font-size: 12px; cursor: pointer; background: var(--accent);
     color: #fff; border: 0; border-radius: 7px; font-family: inherit; font-weight: 500;
@@ -349,6 +364,10 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11M7.5 9.5 12 14l4.5-4.5M4.5 20.5h15"/></svg>
       导出图片
     </button>
+    <button class="btn-export-all" id="btn-settings" title="设置：积分套餐、模型价格与颜色">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h9M17.5 6H20M4 12h2.5M11 12h9M4 18h6.5M14.5 18H20"/><circle cx="15" cy="6" r="2.2"/><circle cx="8.5" cy="12" r="2.2"/><circle cx="12" cy="18" r="2.2"/></svg>
+      设置
+    </button>
   </div>
 
   <div class="kpis">
@@ -425,8 +444,7 @@
 
   <div class="grid2">
     <div class="card span2">
-      <div class="card-head"><h2>模型明细</h2><span class="sub" id="table-sub"></span>
-        <button class="btn-ghost" id="btn-pricing">调整价格</button></div>
+      <div class="card-head"><h2>模型明细</h2><span class="sub" id="table-sub"></span></div>
       <div class="table-wrap">
         <table>
           <thead id="thead-models">
@@ -484,10 +502,32 @@
 <div class="modal-mask" id="pricing-modal" hidden>
   <div class="modal">
     <div class="modal-head">
-      <h3>调整模型 API 价格</h3>
-      <span class="modal-sub">单位：元 / 百万 tokens。「等价 API」列按此价格折算。留空或点「恢复默认」使用内置官方价（显示 ● 的为已手动调整）；未定价模型填入后即生效。</span>
+      <h3>设置</h3>
+      <span class="modal-sub">看板参数与模型计费配置，保存后立即生效并持久化到项目 data/ 目录。</span>
     </div>
-    <div class="modal-body" id="pm-rows"></div>
+    <div class="modal-body">
+      <div class="set-sec">
+        <div class="set-sec-head">
+          <h4>积分套餐</h4>
+          <span class="set-hint">用于总览「积分价值」与折扣率折算，按实际购买的套餐填写</span>
+        </div>
+        <div class="set-row">
+          <input type="number" id="set-cny" step="any" min="0.01" placeholder="140">
+          <span class="set-unit">元</span>
+          <span class="set-sep">/</span>
+          <input type="number" id="set-quota" step="1" min="1" placeholder="9000">
+          <span class="set-unit">积分</span>
+          <span class="set-eq" id="set-eq"></span>
+        </div>
+      </div>
+      <div class="set-sec">
+        <div class="set-sec-head">
+          <h4>模型价格与颜色</h4>
+          <span class="set-hint">单位：元 / 百万 tokens；「等价 API」列按此折算；留空或点「恢复默认」使用内置官方价（显示 ● 的为已手动调整）；未定价模型填入价格后即生效</span>
+        </div>
+        <div id="pm-rows"></div>
+      </div>
+    </div>
     <div class="modal-foot">
       <span class="msg" id="pm-msg"></span>
       <button class="btn-plain" id="pm-cancel">取消</button>
@@ -520,7 +560,7 @@ const MODEL_COLORS = {
 const FALLBACK_COLORS = ['#60a5fa','#f472b6','#facc15','#4ade80','#c084fc','#fb923c','#38bdf8','#eab308'];
 let fallbackIdx = 0;
 const modelColorMap = {};
-const customColors = {};   // 用户在「调整价格」弹窗里为模型自选的颜色（服务端下发）
+const customColors = {};   // 用户在「设置」弹窗里为模型自选的颜色（服务端下发）
 function modelColor(m) {
   if (customColors[m]) return customColors[m];
   if (MODEL_COLORS[m]) return MODEL_COLORS[m];
@@ -546,8 +586,8 @@ function fmtCNY(v) {
   return '¥0';
 }
 const pad2 = n => String(n).padStart(2, '0');
-// 积分按套餐实付价折算：140 元 / 9000 积分（¥0.0156/积分）
-const CREDIT_CNY = 140 / 9000;
+// 积分按套餐实付价折算（默认 140 元 / 9000 积分，可在「设置」中修改，服务端持久化）
+let CREDIT_CNY = 140 / 9000;
 function fmtClock(ms) {
   const d = new Date(ms);
   return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
@@ -817,6 +857,10 @@ let renderCount = 0;
 function render(d) {
   state.lastData = d;
   const k = d.kpi;
+  // 同步「设置」里的积分套餐单价（服务端随 meta 下发）
+  if (d.meta && d.meta.settings && d.meta.settings.credit_cny > 0 && d.meta.settings.credit_quota > 0) {
+    CREDIT_CNY = d.meta.settings.credit_cny / d.meta.settings.credit_quota;
+  }
   // 同步用户自选颜色（服务端随 models 下发；无则清除，回落到内置色板）
   (d.models || []).forEach(x => {
     if (x.color) customColors[x.m] = x.color;
@@ -1178,9 +1222,21 @@ async function openPricing() {
   } catch (e) {
     return;
   }
+  // 积分套餐（用最近一次数据里的设置，兜底默认值）
+  const st = (state.lastData && state.lastData.meta && state.lastData.meta.settings) || {};
+  $('set-cny').value = st.credit_cny > 0 ? st.credit_cny : 140;
+  $('set-quota').value = st.credit_quota > 0 ? st.credit_quota : 9000;
+  updateSetEq();
   renderPM();
   $('pm-msg').textContent = '';
   $('pricing-modal').hidden = false;
+}
+
+function updateSetEq() {
+  const cny = Number($('set-cny').value);
+  const quota = Number($('set-quota').value);
+  $('set-eq').textContent = cny > 0 && quota > 0
+    ? `≈ ¥${(cny / quota).toFixed(4)} / 积分` : '';
 }
 
 function pmVal(mid, k) {
@@ -1231,6 +1287,13 @@ function pmSyncRow(row, mid) {
 }
 
 async function savePricing() {
+  // 积分套餐校验
+  const cny = Number($('set-cny').value);
+  const quota = Number($('set-quota').value);
+  if (!(cny > 0) || !(quota > 0) || cny > 1e9 || quota > 1e9) {
+    $('pm-msg').textContent = '积分套餐：金额与积分数需为正数';
+    return;
+  }
   for (const [mid, ov] of Object.entries(pmState.overrides)) {
     for (const [k, v] of Object.entries(ov)) {
       if (k === 'color') {
@@ -1249,6 +1312,18 @@ async function savePricing() {
     }
   }
   try {
+    // 1) 积分套餐
+    const rs = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settings: { credit_cny: cny, credit_quota: quota } }),
+    });
+    const ds = await rs.json();
+    if (!rs.ok || ds.error) {
+      $('pm-msg').textContent = '保存失败：' + (ds.error || rs.status);
+      return;
+    }
+    // 2) 模型价格与颜色
     const res = await fetch('/api/pricing', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1260,7 +1335,7 @@ async function savePricing() {
       return;
     }
     $('pricing-modal').hidden = true;
-    fetchData();   // 重新拉数据，「等价 API」列按新价格重算
+    fetchData();   // 重新拉数据：「等价 API」列与积分折算按新配置重算
   } catch (e) {
     $('pm-msg').textContent = '保存失败：' + e.message;
   }
@@ -1426,7 +1501,9 @@ function boot() {
   updateTaskSortMarks();
   $('btn-apply').addEventListener('click', applyCustom);
   // 价格调整弹窗
-  $('btn-pricing').addEventListener('click', openPricing);
+  $('btn-settings').addEventListener('click', openPricing);
+  $('set-cny').addEventListener('input', updateSetEq);
+  $('set-quota').addEventListener('input', updateSetEq);
   $('pm-cancel').addEventListener('click', () => { $('pricing-modal').hidden = true; });
   $('pm-save').addEventListener('click', savePricing);
   $('pricing-modal').addEventListener('click', e => {

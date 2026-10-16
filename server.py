@@ -220,6 +220,41 @@ def build_colors(overrides):
 PRICING = build_pricing(load_pricing_overrides())
 MODEL_COLOR_OVERRIDES = build_colors(load_pricing_overrides())
 
+# ---- 通用设置（持久化到 data/settings.json）：积分套餐折算单价等 ----
+SETTINGS_FILE = os.path.join(BASE, 'data', 'settings.json')
+DEFAULT_SETTINGS = {'credit_cny': 140.0, 'credit_quota': 9000.0}   # 套餐实付价：140 元 / 9000 积分
+SETTINGS_FIELDS = ('credit_cny', 'credit_quota')
+
+
+def load_settings():
+    out = dict(DEFAULT_SETTINGS)
+    try:
+        with open(SETTINGS_FILE, encoding='utf-8') as fh:
+            data = json.load(fh)
+        for k in SETTINGS_FIELDS:
+            v = data.get(k) if isinstance(data, dict) else None
+            if isinstance(v, (int, float)) and 0 < v <= 1e9:
+                out[k] = float(v)
+    except Exception:
+        pass
+    return out
+
+
+def sanitize_settings(data):
+    """设置值校验：两个正数（上限 1e9），非法值回落默认"""
+    out = dict(DEFAULT_SETTINGS)
+    for k in SETTINGS_FIELDS:
+        try:
+            v = float((data or {}).get(k))
+            if 0 < v <= 1e9:
+                out[k] = v
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+SETTINGS = load_settings()
+
 
 def is_peak_cn(ms):
     """北京时间高峰时段：周一至周五 9:00-12:00、14:00-18:00（未剔除法定节假日）"""
@@ -1180,6 +1215,7 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
                                'log_records': len(log_index.records) if log_index else 0},
             'credit_precision': {'id': n_id, 'session': len(credit_rows) - n_id,
                                  'credits_all': round(credits_total_all, 2)},
+            'settings': SETTINGS,
         },
         'kpi': {
             **kpi,
@@ -1327,6 +1363,9 @@ class Handler(BaseHTTPRequestHandler):
                 'models': models_list,
             })
             return
+        if u.path == '/api/settings':
+            self._send(200, {'settings': SETTINGS, 'defaults': DEFAULT_SETTINGS})
+            return
         path = u.path
         if path == '/':
             path = '/index.html'
@@ -1370,6 +1409,21 @@ class Handler(BaseHTTPRequestHandler):
             PRICING = build_pricing(ov)
             MODEL_COLOR_OVERRIDES = build_colors(ov)
             self._send(200, {'ok': True, 'count': len(ov)})
+            return
+        if u.path == '/api/settings':
+            global SETTINGS
+            st = sanitize_settings(body.get('settings') if isinstance(body.get('settings'), dict) else body)
+            try:
+                os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+                tmp = SETTINGS_FILE + '.tmp'
+                with open(tmp, 'w', encoding='utf-8') as fh:
+                    json.dump(st, fh, ensure_ascii=False, indent=1)
+                os.replace(tmp, SETTINGS_FILE)
+            except Exception as e:
+                self._send(500, {'error': str(e)})
+                return
+            SETTINGS = st
+            self._send(200, {'ok': True, 'settings': st})
             return
         self._send(404, {'error': 'not found'})
 
