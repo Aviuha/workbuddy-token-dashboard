@@ -250,6 +250,11 @@ def rid_time_of(rid):
     return v if TS_MIN <= v <= TS_MAX else None
 
 
+# AI 自动审批（security_reviewer）与内容安全复核（content_security_reviewer）等
+# 系统调用的 request_type 标记：由平台自动发起、无真实任务归属，不参与任务统计。
+AUX_REQUEST_TYPES = {'security_reviewer', 'content_security_reviewer'}
+
+
 def bucket_start_ms(ms, unit):
     dt = datetime.fromtimestamp(ms / 1000, LOCAL_TZ)
     if unit == '5min':
@@ -539,6 +544,7 @@ def parse_log_file(path):
                              'pt': pt, 'tt': tt, 'mid': mid,
                              'q': d.get('conversation_request_id'),
                              'sid': d.get('conversation_id'),
+                             'rt': d.get('request_type') or None,
                              'd': int(d.get('total_cost_ms') or 0) or None})
     except Exception:
         return None
@@ -560,7 +566,7 @@ class LogIndex:
         try:
             with open(LOG_CACHE_FILE, 'r', encoding='utf-8') as fh:
                 data = json.load(fh)
-            if data.get('v') != 4:
+            if data.get('v') != 5:
                 self.by_file = {}
                 return
             self.by_file = data.get('files', {})
@@ -572,7 +578,7 @@ class LogIndex:
             os.makedirs(os.path.dirname(LOG_CACHE_FILE), exist_ok=True)
             tmp = LOG_CACHE_FILE + '.tmp'
             with open(tmp, 'w', encoding='utf-8') as fh:
-                json.dump({'v': 4, 'files': self.by_file, 'saved': int(time.time() * 1000)}, fh)
+                json.dump({'v': 5, 'files': self.by_file, 'saved': int(time.time() * 1000)}, fh)
             os.replace(tmp, LOG_CACHE_FILE)
         except Exception:
             pass
@@ -657,6 +663,8 @@ class Archive:
                 c.execute('ALTER TABLE calls ADD COLUMN dur INTEGER')
             if 'sid' not in cols:      # v3 迁移：新增所属会话（用于按任务合并）
                 c.execute('ALTER TABLE calls ADD COLUMN sid TEXT')
+            if 'rt' not in cols:       # v4 迁移：新增请求类型（识别 AI 自动审批等系统调用）
+                c.execute('ALTER TABLE calls ADD COLUMN rt TEXT')
             c.execute('CREATE INDEX IF NOT EXISTS idx_calls_ts ON calls(ts)')
             c.execute('''CREATE TABLE IF NOT EXISTS credits (
                 rid TEXT PRIMARY KEY, cr REAL, sid TEXT, t INTEGER,
@@ -674,20 +682,20 @@ class Archive:
                 continue
             self.known.add(uid)
             pending.append((uid, 'trace', r['t'], r['m'], r['p'], r['k'], r['c'], r['r'],
-                            r.get('q'), r.get('d'), None))
+                            r.get('q'), r.get('d'), None, None))
         for r in log_recs:
             uid = 'l:' + (r.get('mid') or ('%d|%s|%d|%d' % (r['t'], r['m'], r['pt'], r['tt'])))
             if uid in self.known:
                 continue
             self.known.add(uid)
             pending.append((uid, 'log', r['t'], r['m'], r['pt'], 0, r['tt'] - r['pt'], 0,
-                            r.get('q'), r.get('d'), r.get('sid')))
+                            r.get('q'), r.get('d'), r.get('sid'), r.get('rt')))
         if not pending:
             return 0
         with self.lock:
             self.con.executemany(
-                'INSERT OR IGNORE INTO calls (uid, src, ts, model, pt, k, ct, rr, rid, dur, sid) '
-                'VALUES (?,?,?,?,?,?,?,?,?,?,?)', pending)
+                'INSERT OR IGNORE INTO calls (uid, src, ts, model, pt, k, ct, rr, rid, dur, sid, rt) '
+                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', pending)
             self.con.commit()
         self.synced_calls += len(pending)
         return len(pending)
@@ -718,13 +726,26 @@ class Archive:
             self.con.commit()
         return cur.rowcount or 0
 
+    def backfill_rts(self, log_recs):
+        """一次性迁移：为已归档但缺请求类型的日志记录回填 rt（幂等）"""
+        rows = [(r['rt'], 'l:' + r['mid']) for r in log_recs
+                if r.get('mid') and r.get('rt')]
+        if not rows:
+            return 0
+        with self.lock:
+            cur = self.con.executemany(
+                'UPDATE calls SET rt = ? WHERE uid = ? AND rt IS NULL', rows)
+            self.con.commit()
+        return cur.rowcount or 0
+
     def query_calls(self, start_ms, end_ms):
         with self.lock:
             rows = self.con.execute(
-                'SELECT uid, src, ts, model, pt, k, ct, rr, rid, dur, sid FROM calls '
+                'SELECT uid, src, ts, model, pt, k, ct, rr, rid, dur, sid, rt FROM calls '
                 'WHERE ts >= ? AND ts < ? ORDER BY ts', (start_ms, end_ms)).fetchall()
         return [{'i': r[0][2:], 'src': r[1], 't': r[2], 'm': r[3], 'p': r[4], 'k': r[5],
-                 'c': r[6], 'r': r[7], 'q': r[8], 'd': r[9], 'sid': r[10]} for r in rows]
+                 'c': r[6], 'r': r[7], 'q': r[8], 'd': r[9], 'sid': r[10],
+                 'rt': r[11]} for r in rows]
 
     def distinct_models(self):
         with self.lock:
@@ -968,9 +989,8 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
             cd = credit_trend.setdefault(m, [0.0] * n_buckets)
             cd[bi] += c['cr']
 
-    # 最新积分记录（不限范围，展示用）
     # 每请求总 token：同一调用的双源记录（trace/log）先合并——
-    # trace 版优先（含缓存明细），rid 取任一版本非空（trace 常因截断缺 rid）。
+    # trace 版优先（含缓存明细），rid / 会话 / 请求类型取任一版本非空（trace 常缺这些）。
     mid_best = {}
     for r in all_recs:
         mid = r.get('i')
@@ -982,9 +1002,13 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
             continue
         keep_trace = r.get('src') == 'trace' and cur.get('src') != 'trace'
         base, other = (r, cur) if keep_trace else (cur, r)
-        if not base.get('q') and other.get('q'):
+        if ((not base.get('q') and other.get('q')) or
+                (not base.get('sid') and other.get('sid')) or
+                (not base.get('rt') and other.get('rt'))):
             base = dict(base)
-            base['q'] = other['q']
+            base['q'] = base.get('q') or other.get('q')
+            base['sid'] = base.get('sid') or other.get('sid')
+            base['rt'] = base.get('rt') or other.get('rt')
         mid_best[mid] = base
     rid_tok = {}
     for r in mid_best.values():
@@ -1004,6 +1028,7 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
 
     # 任务统计：按会话合并（同一连续任务的多个请求与模型都不拆分），列口径与模型明细一致
     # rid → sid：优先取日志记录的会话归属，辅以积分表
+    # 仅统计有真实会话归属的调用：AI 自动审批等系统调用、无法归属的调用均不参与
     rid_sid = {}
     for r in mid_best.values():
         q = r.get('q')
@@ -1015,14 +1040,14 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
 
     task_agg = {}
     for r in mid_best.values():
+        if (r.get('rt') or '') in AUX_REQUEST_TYPES:
+            continue                 # AI 自动审批等系统调用：无真实任务归属，不参与任务统计
         q = r.get('q')
         sid = rid_sid.get(q) if q else None
         if not sid and r.get('sid'):
             sid = r['sid']           # 无 rid 但有会话归属的调用，直接按会话归入
         if not sid:
-            if not q:
-                continue             # 既无请求又无会话：无法归属
-            sid = 'R:' + q           # 仅有请求记录：按单请求独立成行
+            continue                 # 无法归属会话的调用：忽略（不再生成「未命名会话」行）
         t = task_agg.get(sid)
         if t is None:
             t = task_agg[sid] = {'key': sid, 'calls': 0, 'p': 0, 'k': 0, 'c': 0,
@@ -1055,11 +1080,15 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
         key = t['key']
         is_sess = not key.startswith('R:')
         sess = credit_store.sessions.get(key) if is_sess else None
+        title = (sess or {}).get('title') or ''
+        if not title:
+            # 无法命名归属的会话（系统临时 ID、已被清理的老会话等）：忽略，不显示「未命名会话」行
+            continue
         credits_sum = sum(rid_cr.get(q, 0.0) for q in t['reqs'])
         task_stats.append({
             'sid': key[:8] if is_sess else key[2:14],
             't': t['last'], 'first': t['first'],
-            'title': (sess or {}).get('title') or '',
+            'title': title,
             'models': sorted(t['models']),
             'reqs': len(t['reqs']),
             'calls': t['calls'],
@@ -1313,11 +1342,12 @@ def main():
     n_new = ARCHIVE.sync_calls(INDEX.records, LOGS.records)
     n_bf = ARCHIVE.backfill_durations(INDEX.records, LOGS.records)   # 历史记录回填耗时（一次性迁移）
     n_bf_sid = ARCHIVE.backfill_sids(LOGS.records)     # 历史记录回填会话（一次性迁移）
+    n_bf_rt = ARCHIVE.backfill_rts(LOGS.records)       # 历史记录回填请求类型（一次性迁移）
     CREDITS = CreditStore()
     ARCHIVE.sync_credits(CREDITS.rows)
     print(f'  索引完成: {len(INDEX.by_file)} 个 trace 文件, {len(INDEX.records)} 条调用记录')
     print(f'  日志索引: {len(LOGS.by_file)} 个日志文件, {len(LOGS.records)} 条上报记录')
-    print(f'  归档: 本次新入库 {n_new} 条，回填耗时 {n_bf} 条 / 会话 {n_bf_sid} 条，'
+    print(f'  归档: 本次新入库 {n_new} 条，回填耗时 {n_bf} 条 / 会话 {n_bf_sid} 条 / 类型 {n_bf_rt} 条，'
           f'累计 {ARCHIVE.synced_calls} 条调用 / {len(ARCHIVE.query_credits())} 条积分')
     print(f'  积分记录: {len(CREDITS.rows)} 条' + (f' (DB 错误: {CREDITS.err})' if CREDITS.err else ''))
     t = threading.Thread(target=refresh_loop, daemon=True)
