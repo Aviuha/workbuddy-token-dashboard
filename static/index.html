@@ -673,7 +673,7 @@ function render(d) {
   $('k-out').textContent = fmtNum(k.completion);
   $('k-out-sub').innerHTML = k.reasoning ? `含推理 <b>${fmtNum(k.reasoning)}</b>` : ' (模型输出)';
   $('k-credit').textContent = k.credits.toFixed(2);
-  $('k-credit-sub').innerHTML = `涉及 <b>${k.credit_reqs}</b> 个请求`;
+  $('k-credit-sub').innerHTML = `等价 API <b>${fmtCNY(k.cost)}</b>`;
   $('k-calls').textContent = fmtInt(k.calls);
   $('k-calls-sub').innerHTML = `时段内 <b>${d.meta.records_in_range}</b> 条记录`;
 
