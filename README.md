@@ -7,6 +7,17 @@
 > A local dashboard that visualizes WorkBuddy token usage, credit consumption and cache hit rate.
 > Fully offline, zero dependencies, runs on macOS / Windows / Linux.
 
+![看板界面（深色主题）](screenshots/dashboard-dark.png)
+
+*（截图为演示数据）*
+
+<details>
+<summary>浅色主题</summary>
+
+![看板界面（浅色主题）](screenshots/dashboard-light.png)
+
+</details>
+
 ## 功能
 
 - **按模型分类的图表**：用量趋势（可切换总量 / 新输入 / 缓存 / 输出四种指标）、占比环形图、明细表（调用数、缓存命中率、生成速度、积分、等价 API 价、折扣，支持点击表头排序，默认按总计降序）
@@ -20,7 +31,9 @@
   与按各厂商官方定价把 token 折算成的「等价 API 价」并列对照；积分卡片徽标显示两者比值（折扣，区间口径）
 - **导出图片**：每个模块右上角可单独导出该模块为 PNG；顶部「导出图片」一键导出整个看板长图
   （含时间范围与导出时间标注）。导出内容始终与当前选择的时间线一致，滚动中的表格会展开为完整数据
-- **实时刷新**：1s / 3s / 5s / 10s / 暂停可调；数据无变化时不重绘图表
+- **实时刷新**：1s / 3s / 5s / 10s / 暂停可调；数据无变化时不重绘图表；
+  页面切到后台自动降为 30s 低频轮询、回到前台立即恢复（服务端聚合结果按需缓存，重复请求毫秒级返回）；
+  连接失败按指数退避自动重试（2s ~ 30s 封顶），恢复后立即回到所选频率
 - **深色 / 浅色主题**，切换后本地记忆；响应式布局，窄屏自动单列
 - **本地持久归档**：扫描到的数据写入本地 SQLite（`data/archive.db`，只增不删），
   即使 WorkBuddy 原始记录被轮转清理，历史统计也不会丢失
@@ -50,7 +63,13 @@ chmod +x start.sh
 
 **Windows**
 
-双击 `start.bat`（服务在最小化的命令行窗口中运行，关闭该窗口即停止）。
+```bat
+start.bat            :: 启动（服务在最小化的命令行窗口中运行）
+start.bat restart    :: 重启（修改后端代码后重新加载）
+start.bat stop       :: 停止
+```
+
+也可直接双击 `start.bat` 启动；关闭服务窗口同样可停止服务。
 
 **手动运行（任意平台）**
 
@@ -63,8 +82,8 @@ python3 server.py
 
 - 启动失败：查看同目录 `server.log`
 - 端口被占用：修改 `server.py` 顶部 `PORT`（同时改启动脚本中的端口）
-- 停止服务：macOS/Linux 执行 `./start.sh stop`；Windows 关闭服务窗口
-- 修改后端代码后：执行 `./start.sh restart` 重新加载（Python 进程不会热更新已加载的代码）
+- 停止服务：macOS/Linux 执行 `./start.sh stop`；Windows 执行 `start.bat stop`（或关闭服务窗口）
+- 修改后端代码后：执行 `./start.sh restart`（Windows 用 `start.bat restart`）重新加载（Python 进程不会热更新已加载的代码）
 - 页面没有数据：属正常——看板读取的是**本机** `~/.workbuddy/` 的使用记录
 
 ## 数据来源
