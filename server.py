@@ -867,34 +867,60 @@ class CreditStore:
 
 
 BYOK_PREFIX = 'custom-local:'   # 自带 API Key 的模型（走用户自己的 API），调用不消耗 WorkBuddy 积分
+# 不消耗积分的模型（平台免费/预览期免费等；经调用级扣费日志核实：
+# step-5-preview 在 10-15 / 10-16 的全部调用（236 / 67 个）均无 credit consumed 记录）。
+# 与 BYOK 同处理：不参与积分归属，避免积分被误归到它们头上。
+FREE_MODELS = {'step-5-preview'}
 
 
 def is_byok(model):
     return bool(model) and model.startswith(BYOK_PREFIX)
 
 
-def build_rid_model(records):
-    """requestId -> 出现最多的非 BYOK 模型（用于积分按模型归属）
+def is_free(model):
+    return bool(model) and model in FREE_MODELS
 
-    自带 API Key 的模型调用不计积分，因此不参与积分归属；
-    若某个请求只包含 BYOK 调用，则不出现在映射中。
+
+def build_rid_model(records):
+    """requestId -> 出现最多的非 BYOK / 非免费模型（用于积分按模型归属）
+
+    自带 API Key 与免费模型的调用不计积分，因此不参与积分归属；
+    若某个请求只包含这类调用，则不出现在映射中。
     """
     models = {}
     for r in records:
         q = r.get('q')
-        if not q or is_byok(r['m']):
+        if not q or is_byok(r['m']) or is_free(r['m']):
             continue
         d = models.setdefault(q, {})
         d[r['m']] = d.get(r['m'], 0) + r['p'] + r['c']
     return {q: max(d.items(), key=lambda kv: kv[1])[0] for q, d in models.items()}
 
 
-def credit_model_of(credit, rid_model, sessions):
-    """积分条目 -> 归属模型；无法精确定位时返回「未归属」"""
+def build_sid_model(records):
+    """会话 -> 会话内实际主模型（同口径排除 BYOK / 免费模型）。
+
+    用于积分的会话级归属：会话表记录的模型字段可能滞后或不准，
+    以会话内实际调用（token 最多者）为准。
+    """
+    models = {}
+    for r in records:
+        sid = r.get('sid')
+        if not sid or is_byok(r['m']) or is_free(r['m']):
+            continue
+        d = models.setdefault(sid, {})
+        d[r['m']] = d.get(r['m'], 0) + r['p'] + r['c']
+    return {sid: max(d.items(), key=lambda kv: kv[1])[0] for sid, d in models.items()}
+
+
+def credit_model_of(credit, rid_model, sid_model, sessions):
+    """积分条目 -> 归属模型；优先请求级、其次会话实际调用、再次会话表记录；无法定位返回「未归属」"""
     m = rid_model.get(credit['rid'])
+    if not m and credit.get('sid'):
+        m = sid_model.get(credit['sid'])
     if not m:
         sess_m = credit.get('sess_model') or (sessions.get(credit['sid']) or {}).get('model')
-        if sess_m and not is_byok(sess_m):
+        if sess_m and not is_byok(sess_m) and not is_free(sess_m):
             m = sess_m
     return m or '未归属'
 
@@ -1002,6 +1028,7 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
 
     # ---- 积分 ----
     rid_model = build_rid_model(all_recs)
+    sid_model = build_sid_model(all_recs)
     credit_rows = archive.query_credits()
     if not credit_rows:
         credit_rows = credit_store.rows
@@ -1020,7 +1047,7 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
             credits_exact += c['cr']
         else:
             n_approx += 1
-        m = credit_model_of(c, rid_model, credit_store.sessions)
+        m = credit_model_of(c, rid_model, sid_model, credit_store.sessions)
         if m == '未归属':
             n_unassigned += 1
         credit_by_model[m] = credit_by_model.get(m, 0.0) + c['cr']
@@ -1094,7 +1121,7 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
     credit_rid = {c['rid']: c for c in credit_rows}
     latest_credits = []
     for c in sorted(credit_rows, key=lambda x: -x['t'])[:8]:
-        m = credit_model_of(c, rid_model, credit_store.sessions)
+        m = credit_model_of(c, rid_model, sid_model, credit_store.sessions)
         sess = credit_store.sessions.get(c['sid']) or {}
         latest_credits.append({'t': c['t'], 'cr': round(c['cr'], 4), 'm': m,
                                'tsrc': c['tsrc'], 'sid': c['sid'][:8],
