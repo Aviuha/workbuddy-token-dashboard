@@ -880,13 +880,23 @@ function render(d) {
     `<span class="cv-seg">积分价值 <b>${fmtCNY(k.credits * CREDIT_CNY)}</b> ·</span> ` +
     `<span class="cv-seg">等价 API <b>${fmtCNY(k.cost)}</b></span>`;
   $('k-credit-sub').title = '积分价值：按 140 元 / 9000 积分套餐价折算（约 ¥0.0156/积分）；等价 API：同等用量按各厂商官方定价的费用';
-  // 套餐折扣率（当前区间口径：积分实付价值 ÷ 官方 API 等价价）
+  // 套餐折扣率（区间口径）：仅统计「既消耗积分、又有官方等价价」的模型——
+  // 不消耗积分的调用（自带 Key 等）与官方未定价模型不参与折算，避免摊薄折扣
   const discEl = $('k-credit-disc');
-  if (k.credits > 0 && k.cost > 0) {
-    const disc = k.credits * CREDIT_CNY / k.cost;
+  let dNum = 0, dDen = 0;
+  (d.models || []).forEach(m => {
+    const cr = m.credits || 0;
+    const c = m.cost;
+    if (cr > 0 && c > 0) {
+      dNum += cr * CREDIT_CNY;
+      dDen += c;
+    }
+  });
+  if (dNum > 0 && dDen > 0) {
+    const disc = dNum / dDen;
     discEl.hidden = false;
     discEl.textContent = `≈${(disc * 10).toFixed(1)} 折`;
-    discEl.title = `套餐折扣 = 积分价值 ÷ 等价 API = ${(disc * 100).toFixed(1)}%（当前时间范围）\n当范围内含自带 Key 等不消耗积分的调用时，该比值会被摊薄偏低`;
+    discEl.title = `套餐折扣 = 消耗积分模型的积分价值 ÷ 其等价 API = ${(disc * 100).toFixed(1)}%（当前时间范围）\n不消耗积分的调用（自带 Key 等）与官方未定价模型不参与折算`;
   } else {
     discEl.hidden = true;
   }
