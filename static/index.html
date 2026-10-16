@@ -134,6 +134,32 @@
   .c-amber .value { color: var(--amber); }
   .c-purple .value { color: var(--purple); }
 
+  /* ---------- 折扣率徽标与导出 ---------- */
+  .disc-pill {
+    display: inline-block; margin-left: 6px; padding: 0 7px; border-radius: 99px;
+    font-size: 10.5px; line-height: 17px; color: var(--amber);
+    background: rgba(245,183,77,.13); border: 1px solid rgba(245,183,77,.3);
+    vertical-align: 1px; cursor: help; letter-spacing: 0;
+  }
+  .btn-export-all {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 12px; font-size: 12px; font-family: inherit;
+    background: var(--panel); color: var(--text-2); border: 1px solid var(--border);
+    border-radius: 8px; cursor: pointer;
+  }
+  .btn-export-all:hover { color: var(--text); border-color: var(--text-3); }
+  .btn-export-all:disabled { opacity: .55; cursor: default; }
+  .btn-export-all svg { width: 13px; height: 13px; }
+  .exp-btn {
+    margin-left: auto; width: 26px; height: 26px; flex-shrink: 0; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: transparent; border: 1px solid transparent; border-radius: 7px;
+    color: var(--text-3); cursor: pointer;
+  }
+  .exp-btn:hover { color: var(--text); background: var(--hover); border-color: var(--border); }
+  .exp-btn:disabled { opacity: .5; cursor: default; }
+  .exp-btn svg { width: 14px; height: 14px; }
+
   /* ---------- 图表 ---------- */
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
   .grid2 .span2 { grid-column: 1 / -1; }
@@ -319,6 +345,10 @@
       <button data-int="10000">10s</button>
       <button data-int="0">暂停</button>
     </div>
+    <button class="btn-export-all" id="btn-export-all" title="导出当前视图为完整长图（含时间范围标注，与当前选择的时间线一致）">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11M7.5 9.5 12 14l4.5-4.5M4.5 20.5h15"/></svg>
+      导出图片
+    </button>
   </div>
 
   <div class="kpis">
@@ -343,7 +373,7 @@
       <div class="sub" id="k-out-sub">&nbsp;</div>
     </div>
     <div class="kpi c-amber">
-      <div class="label">积分消耗</div>
+      <div class="label">积分消耗 <span class="disc-pill" id="k-credit-disc" hidden></span></div>
       <div class="value" id="k-credit">—</div>
       <div class="sub" id="k-credit-sub">&nbsp;</div>
     </div>
@@ -467,6 +497,7 @@
 </div>
 
 <script src="/static/echarts.min.js"></script>
+<script src="/static/html2canvas.min.js"></script>
 <script>
 'use strict';
 /* ================= 基础 ================= */
@@ -658,6 +689,129 @@ function setLive(mode, text) {
   else $('live-text').textContent = `实时 · ${state.interval / 1000}s`;
 }
 
+/* ================= 导出图片 ================= */
+const RANGE_NAMES = { today: '当日', '7d': '近7天', '30d': '近30天', month: '本月', all: '全部', custom: '自定义' };
+
+function humanRange() {
+  const base = RANGE_NAMES[state.range] || state.range;
+  let span = '';
+  const meta = state.lastData && state.lastData.meta && state.lastData.meta.range;
+  if (meta) {
+    const f = ms => {
+      const dt = new Date(ms);
+      return `${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())} ${pad2(dt.getHours())}:${pad2(dt.getMinutes())}`;
+    };
+    span = `${f(meta.start)} ~ ${f(meta.end)}`;
+  }
+  return { base, span };
+}
+
+function exportFileName(prefix) {
+  const dt = new Date();
+  const { base } = humanRange();
+  const d = `${dt.getFullYear()}${pad2(dt.getMonth() + 1)}${pad2(dt.getDate())}-${pad2(dt.getHours())}${pad2(dt.getMinutes())}`;
+  return `${prefix}_${base}_${d}.png`;
+}
+
+async function exportPNG(el, filename, opts = {}) {
+  if (!window.html2canvas) throw new Error('导出组件未加载');
+  // 收起所有图表 tooltip，避免截入图片
+  Object.values(charts).forEach(c => { try { c.dispatchAction({ type: 'hideTip' }); } catch (e) {} });
+  const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#0b0e14';
+  // 预估展开滚动容器后的完整高度（表格 / 列表在克隆中会展开为全部内容）
+  let extra = 0;
+  el.querySelectorAll('.table-scroll, .req-list').forEach(n => {
+    extra += Math.max(0, n.scrollHeight - n.clientHeight);
+  });
+  const w = Math.max(el.scrollWidth, el.offsetWidth);
+  const h = Math.max(el.scrollHeight, el.offsetHeight) + extra;
+  let scale = 2;
+  const MAXPX = 15000;
+  if (Math.max(w, h) * scale > MAXPX) scale = Math.max(1, MAXPX / Math.max(w, h));
+  const canvas = await html2canvas(el, {
+    scale,
+    backgroundColor: bg,
+    logging: false,
+    onclone: doc => {
+      doc.querySelectorAll('.exp-btn, #btn-export-all, #theme-btn').forEach(n => { n.style.display = 'none'; });
+      doc.querySelectorAll('.table-scroll, .req-list').forEach(n => {
+        n.style.maxHeight = 'none';
+        n.style.overflow = 'visible';
+      });
+      if (opts.annotate) {
+        const root = doc.querySelector(opts.annotate.root) || doc.body;
+        const { base, span } = humanRange();
+        const dt = new Date();
+        const ts = `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())} ${pad2(dt.getHours())}:${pad2(dt.getMinutes())}`;
+        const bar = doc.createElement('div');
+        bar.textContent = `WorkBuddy Token 看板 · 时间范围：${base}${span ? '（' + span + '）' : ''} · 导出时间 ${ts}`;
+        bar.setAttribute('style', 'padding:2px 0 12px;font-size:12px;color:var(--text-3);font-family:inherit;');
+        root.insertBefore(bar, root.firstChild);
+      }
+    },
+  });
+  if (!opts.noDownload) {
+    await new Promise(res => {
+      canvas.toBlob(blob => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        res();
+      }, 'image/png');
+    });
+  }
+  return canvas;
+}
+
+const EXP_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11M7.5 9.5 12 14l4.5-4.5M4.5 20.5h15"/></svg>';
+
+function bindExports() {
+  document.querySelectorAll('.card').forEach(card => {
+    const head = card.querySelector('.card-head');
+    if (!head || head.querySelector('.exp-btn')) return;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'exp-btn';
+    btn.title = '导出此模块为图片（与当前时间线一致）';
+    btn.innerHTML = EXP_ICON;
+    btn.addEventListener('click', async () => {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      try {
+        const name = ((card.querySelector('h2') || {}).textContent || '模块').trim().replace(/\s+/g, '');
+        await exportPNG(card, exportFileName(name));
+      } catch (e) {
+        alert('导出失败：' + (e && e.message ? e.message : e));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+    head.appendChild(btn);
+  });
+  const all = $('btn-export-all');
+  if (all) {
+    const label = all.innerHTML;
+    all.addEventListener('click', async () => {
+      if (all.disabled) return;
+      all.disabled = true;
+      all.innerHTML = EXP_ICON + '导出中…';
+      try {
+        await exportPNG(document.querySelector('.wrap'), exportFileName('看板总览'), { annotate: { root: '.wrap' } });
+      } catch (e) {
+        alert('导出失败：' + (e && e.message ? e.message : e));
+      } finally {
+        all.disabled = false;
+        all.innerHTML = label;
+      }
+    });
+  }
+}
+
 /* ================= 渲染 ================= */
 let renderCount = 0;
 function render(d) {
@@ -682,6 +836,16 @@ function render(d) {
     `<span class="cv-seg">积分价值 <b>${fmtCNY(k.credits * CREDIT_CNY)}</b> ·</span> ` +
     `<span class="cv-seg">等价 API <b>${fmtCNY(k.cost)}</b></span>`;
   $('k-credit-sub').title = '积分价值：按 140 元 / 9000 积分套餐价折算（约 ¥0.0156/积分）；等价 API：同等用量按各厂商官方定价的费用';
+  // 套餐折扣率（当前区间口径：积分实付价值 ÷ 官方 API 等价价）
+  const discEl = $('k-credit-disc');
+  if (k.credits > 0 && k.cost > 0) {
+    const disc = k.credits * CREDIT_CNY / k.cost;
+    discEl.hidden = false;
+    discEl.textContent = `≈${(disc * 10).toFixed(1)} 折`;
+    discEl.title = `套餐折扣 = 积分价值 ÷ 等价 API = ${(disc * 100).toFixed(1)}%（当前时间范围）\n当范围内含自带 Key 等不消耗积分的调用时，该比值会被摊薄偏低`;
+  } else {
+    discEl.hidden = true;
+  }
   $('k-calls').textContent = fmtInt(k.calls);
   $('k-calls-sub').innerHTML = `时段内 <b>${d.meta.records_in_range}</b> 条记录`;
 
@@ -1299,6 +1463,7 @@ function boot() {
     rt = setTimeout(() => Object.values(charts).forEach(c => c.resize()), 150);
   });
 
+  bindExports();
   fetchData();
   state.timer = setInterval(fetchData, state.interval);
 }
