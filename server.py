@@ -14,14 +14,17 @@ WorkBuddy Token 用量看板 — 本地实时服务（仅用 Python 标准库）
     毫秒时间戳，可直接解出精确时间（与 trace 首 span 互验，误差秒级）。
   - 旧式随机 UUID 无法解时间，回退到所在会话的最近活动时间，标注为近似。
 """
+import atexit
 import bisect
 import json
 import os
 import re
+import signal
 import sqlite3
+import sys
 import threading
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -81,6 +84,7 @@ STATIC_DIR = os.path.join(BASE, 'static')
 CACHE_FILE = os.path.join(BASE, 'data', 'index-cache.json')
 LOG_CACHE_FILE = os.path.join(BASE, 'data', 'log-index-cache.json')
 PORT = 8899
+VERSION = '1.1.0'
 
 LOCAL_TZ = datetime.now().astimezone().tzinfo
 CN_TZ = timezone(timedelta(hours=8))          # 北京时间，用于峰谷判定
@@ -88,9 +92,9 @@ RID_RE = re.compile(r'"conversationRequestId":\s*"([0-9a-f]{32})"')
 QUA_RE = re.compile(r'qua\.end: (\{.*)$')
 LOG_LINE_TIME_RE = re.compile(
     r'^\[(\d{1,2})/(\d{1,2})/(\d{4}), (\d{1,2}):(\d{2}):(\d{2})(?:\.\d+)?\s*(AM|PM)')
-SCAN_INTERVAL = 1.5      # 索引扫描周期（秒，默认值；实际周期跟随页面刷新设置）
-LOG_SCAN_INTERVAL = 15.0  # 日志扫描周期（秒）
-CREDIT_INTERVAL = 3.0    # 积分刷新周期（秒）
+# 索引缓存（index-cache.json / log-index-cache.json）最小落盘间隔（秒）：
+# 缓存只用于冷启动加速，无需每次变化都全量重写；退出前会强制落盘一次。
+CACHE_SAVE_MIN_INTERVAL = 30.0
 
 # 页面刷新设置（毫秒，0 = 暂停），由 /api/data 的 iv 参数更新；
 # 服务端采集周期跟随它自动调整，让用户选择的刷新频率真正决定数据新鲜度。
@@ -107,6 +111,25 @@ def collect_interval():
     if not iv:
         return 5.0
     return round(max(0.6, min(iv / 1000.0 * 0.6, 5.0)), 2)
+
+
+def log_err(msg):
+    """后台异常统一落 stderr（server.log），排障有痕迹"""
+    try:
+        print('[%s] %s' % (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), msg),
+              file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
+# 数据版本号：归档 / 积分 / 价格 / 设置任一变化时自增，用于聚合结果缓存失效判断
+DATA_EPOCH = {'v': 1}
+
+
+def bump_data_epoch():
+    DATA_EPOCH['v'] += 1
+
+
 RID_TIME_TOLERANCE = 6 * 3600 * 1000   # span 时间与 requestId 时间戳的最大容忍差
 TS_MIN, TS_MAX = 1577836800000, 1893456000000   # 2020-01-01 ~ 2030-01-01
 
@@ -462,6 +485,8 @@ class UsageIndex:
         self.last_scan = None
         self.last_scan_ms = None
         self.error_files = 0
+        self._dirty = False      # 缓存有变化待落盘
+        self._last_save = 0.0
         self._load_cache()
         self.scan()
 
@@ -483,8 +508,23 @@ class UsageIndex:
             with open(tmp, 'w', encoding='utf-8') as fh:
                 json.dump({'v': 3, 'files': self.by_file, 'saved': int(time.time() * 1000)}, fh)
             os.replace(tmp, CACHE_FILE)
-        except Exception:
-            pass
+            self._last_save = time.time()
+            return True
+        except Exception as e:
+            log_err('index-cache 落盘失败: %r' % e)
+            return False
+
+    def maybe_save_cache(self, force=False):
+        """节流落盘：变化先标记 dirty，最快每 CACHE_SAVE_MIN_INTERVAL 秒全量写一次；
+        force=True（退出前）忽略节流。缓存仅用于冷启动加速，短窗口滞后无影响。"""
+        if not self._dirty:
+            return False
+        if not force and time.time() - self._last_save < CACHE_SAVE_MIN_INTERVAL:
+            return False
+        if self._save_cache():
+            self._dirty = False
+            return True
+        return False
 
     def scan(self):
         t0 = time.time()
@@ -535,7 +575,8 @@ class UsageIndex:
             self.last_scan_ms = int((time.time() - t0) * 1000)
             self.error_files = errors
         if changed:
-            self._save_cache()
+            self._dirty = True
+        self.maybe_save_cache()
         return changed
 
 
@@ -600,6 +641,8 @@ class LogIndex:
         self.by_file = {}
         self.records = []
         self.last_scan = None
+        self._dirty = False
+        self._last_save = 0.0
         self._load_cache()
         self.scan()
 
@@ -621,8 +664,22 @@ class LogIndex:
             with open(tmp, 'w', encoding='utf-8') as fh:
                 json.dump({'v': 5, 'files': self.by_file, 'saved': int(time.time() * 1000)}, fh)
             os.replace(tmp, LOG_CACHE_FILE)
-        except Exception:
-            pass
+            self._last_save = time.time()
+            return True
+        except Exception as e:
+            log_err('log-index-cache 落盘失败: %r' % e)
+            return False
+
+    def maybe_save_cache(self, force=False):
+        """与 UsageIndex 相同：节流落盘 + 退出前强制"""
+        if not self._dirty:
+            return False
+        if not force and time.time() - self._last_save < CACHE_SAVE_MIN_INTERVAL:
+            return False
+        if self._save_cache():
+            self._dirty = False
+            return True
+        return False
 
     def scan(self):
         files = []
@@ -676,7 +733,9 @@ class LogIndex:
             self.records = recs
             self.last_scan = int(time.time() * 1000)
         if changed:
-            self._save_cache()
+            self._dirty = True
+        self.maybe_save_cache()
+        return changed
 
 
 class Archive:
@@ -821,6 +880,7 @@ class CreditStore:
         self.rows = []
         self.sessions = {}
         self.err = None
+        self._sig = None          # 积分/会话相关状态的指纹（判定有无实际变化）
         self.refresh()
 
     def refresh(self):
@@ -862,8 +922,17 @@ class CreditStore:
             self.rows = rows
             self.sessions = sessions
             self.err = None
+            # 指纹：积分条目（rid + 金额 + 时间）与会话（名称/模型）集合的变化判定，
+            # 无变化时调用方可跳过归档同步与聚合缓存失效
+            new_sig = (hash(tuple(sorted((r['rid'], r['cr'], r['t']) for r in rows))),
+                       hash(tuple(sorted((k, (v.get('title') or ''), (v.get('model') or ''))
+                                         for k, v in sessions.items()))))
+            changed = new_sig != self._sig
+            self._sig = new_sig
+            return changed
         except Exception as e:
             self.err = str(e)
+            return False
 
 
 BYOK_PREFIX = 'custom-local:'   # 自带 API Key 的模型（走用户自己的 API），调用不消耗 WorkBuddy 积分
@@ -975,8 +1044,7 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
     first_b = starts[0]
 
     kpi = {'total': 0, 'prompt': 0, 'cached': 0, 'fresh': 0, 'completion': 0,
-           'reasoning': 0, 'calls': 0, 'credits': 0.0, 'credit_reqs': 0, 'cost': 0.0,
-           'prompt_cov': 0, 'supp_calls': len(supplements), 'supp_tokens': supp_tokens}
+           'reasoning': 0, 'calls': 0, 'credits': 0.0, 'credit_reqs': 0, 'cost': 0.0}
     models = {}
     trend = {}
     type_trend = {'p': [0] * n_buckets, 'k': [0] * n_buckets, 'c': [0] * n_buckets}
@@ -992,8 +1060,6 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
         kpi['completion'] += r['c']
         kpi['reasoning'] += r['r']
         kpi['calls'] += 1
-        if not r.get('supp'):
-            kpi['prompt_cov'] += r['p']      # 有缓存明细的输入（命中率分母）
         # 官方 API 等价价格（人民币），DeepSeek 按调用发生时间判定峰谷
         price = PRICING.get(r['m'])
         cost = 0.0
@@ -1003,7 +1069,7 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
             kpi['cost'] += cost
         m = models.setdefault(r['m'], {'m': r['m'], 'calls': 0, 'p': 0, 'k': 0, 'c': 0,
                                        'reason': 0, 'credits': 0.0, 'credit_reqs': 0,
-                                       'cost': 0.0, 'first': r['t'], 'last': r['t'], 'p_cov': 0,
+                                       'cost': 0.0, 'first': r['t'], 'last': r['t'],
                                        'out_dur': 0, 'out_tok': 0})
         m['calls'] += 1
         m['p'] += r['p']
@@ -1011,8 +1077,6 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
         m['c'] += r['c']
         m['reason'] += r['r']
         m['cost'] += cost
-        if not r.get('supp'):
-            m['p_cov'] += r['p']
         if r.get('d'):      # 生成速度：仅统计有耗时记录的调用（输出 tokens ÷ 生成时长）
             m['out_dur'] += r['d']
             m['out_tok'] += r['c']
@@ -1034,8 +1098,6 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
         credit_rows = credit_store.rows
     credit_by_model = {}
     credit_trend = {}
-    credits_exact = 0.0
-    n_approx = 0
     n_unassigned = 0
     for c in credit_rows:
         t = c['t']
@@ -1043,10 +1105,6 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
             continue
         kpi['credits'] += c['cr']
         kpi['credit_reqs'] += 1
-        if c['tsrc'] == 'id':
-            credits_exact += c['cr']
-        else:
-            n_approx += 1
         m = credit_model_of(c, rid_model, sid_model, credit_store.sessions)
         if m == '未归属':
             n_unassigned += 1
@@ -1118,7 +1176,6 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
         if q:
             rid_tok[q] = rid_tok.get(q, 0) + r['p'] + r['c']
 
-    credit_rid = {c['rid']: c for c in credit_rows}
     latest_credits = []
     for c in sorted(credit_rows, key=lambda x: -x['t'])[:8]:
         m = credit_model_of(c, rid_model, sid_model, credit_store.sessions)
@@ -1204,23 +1261,13 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
     task_stats.sort(key=lambda x: -x['t'])
     task_stats = task_stats[:300]
 
-    # 最近调用明细
-    recent = []
-    for r in recs[-40:][::-1]:
-        q = r.get('q')
-        info = credit_rid.get(q) if q else None
-        recent.append({'t': r['t'], 'm': r['m'], 'p': r['p'], 'k': r['k'], 'c': r['c'],
-                       'cr': round(info['cr'], 4) if info else None})
-        if len(recent) >= 15:
-            break
-
     buckets = list(starts)
     model_list = sorted(models.values(), key=lambda m: -(m['p'] + m['c']))
     if credit_by_model.get('未归属'):
         model_list.append({
             'm': '未归属', 'calls': 0, 'p': 0, 'k': 0, 'c': 0, 'total': 0,
             'reason': 0, 'credits': credit_by_model['未归属'], 'credit_reqs': n_unassigned,
-            'cost': 0.0, 'first': None, 'last': None, 'p_cov': 0, 'speed': None,
+            'cost': 0.0, 'first': None, 'last': None, 'speed': None,
             'out_dur': 0, 'out_tok': 0,
         })
     credits_total_all = sum(c['cr'] for c in credit_rows)
@@ -1229,6 +1276,7 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
     return {
         'now': now_ms,
         'meta': {
+            'version': VERSION,
             'range': {'start': start_ms, 'end': end_ms, 'unit': unit, 'buckets': n_buckets},
             'data_from': all_recs[0]['t'] if all_recs else None,
             'data_to': all_recs[-1]['t'] if all_recs else None,
@@ -1249,7 +1297,6 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
             'cache_rate': (kpi['cached'] / kpi['prompt']) if kpi['prompt'] else 0.0,
             'cost': round(kpi['cost'], 4),
             'credits': round(kpi['credits'], 4),
-            'credits_exact': round(credits_exact, 4),
         },
         'trend': {'buckets': buckets, 'models': trend, 'types': type_trend},
         'models': [{
@@ -1263,12 +1310,38 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
             'speed': round(m.get('out_tok', 0) / (m.get('out_dur', 0) / 1000.0), 1) if m.get('out_dur') else None,
             'first': m['first'], 'last': m['last'],
         } for m in model_list],
-        'credit_trend': {'buckets': buckets, 'by_model': credit_trend,
-                         'by_model_total': {k: round(v, 4) for k, v in credit_by_model.items()}},
+        'credit_trend': {'buckets': buckets, 'by_model': credit_trend},
         'latest_credits': latest_credits,
         'task_stats': task_stats,
-        'recent': recent,
     }
+
+
+# ---- 聚合结果缓存 ----
+# 键为 (start, end, unit)，值为 (数据版本, 聚合结果)。数据版本不变时直接复用，
+# 避免页面 1s 刷新下每秒全量重算；命中时仅刷新 now / collect_interval 等会话级字段。
+AGG_CACHE = OrderedDict()
+AGG_CACHE_MAX = 4
+AGG_LOCK = threading.Lock()
+
+
+def get_aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, now_ms):
+    key = (start_ms, end_ms, unit)
+    with AGG_LOCK:
+        hit = AGG_CACHE.get(key)
+        if hit is not None and hit[0] == DATA_EPOCH['v']:
+            AGG_CACHE.move_to_end(key)
+            result = dict(hit[1])
+            result['now'] = now_ms
+            meta = dict(result['meta'])
+            meta['collect_interval'] = collect_interval()
+            result['meta'] = meta
+            return result
+        result = aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, now_ms)
+        AGG_CACHE[key] = (DATA_EPOCH['v'], result)
+        AGG_CACHE.move_to_end(key)
+        while len(AGG_CACHE) > AGG_CACHE_MAX:
+            AGG_CACHE.popitem(last=False)
+        return result
 
 
 INDEX = None
@@ -1283,27 +1356,31 @@ def refresh_loop():
     while True:
         step = collect_interval()
         try:
-            INDEX.scan()
-        except Exception:
-            pass
+            if INDEX.scan():
+                bump_data_epoch()
+        except Exception as e:
+            log_err('trace 扫描异常: %r' % e)
         now = time.time()
         if now - last_log > max(step * 4.0, 12.0):
             try:
-                LOGS.scan()
-            except Exception:
-                pass
+                if LOGS.scan():
+                    bump_data_epoch()
+            except Exception as e:
+                log_err('日志扫描异常: %r' % e)
             last_log = now
         # 汇聚新记录到持久归档（幂等，仅写未见过的新数据）
         try:
-            ARCHIVE.sync_calls(INDEX.records, LOGS.records)
-        except Exception:
-            pass
+            if ARCHIVE.sync_calls(INDEX.records, LOGS.records):
+                bump_data_epoch()
+        except Exception as e:
+            log_err('归档写入异常: %r' % e)
         if now - last_credit > max(step * 2.0, 2.0):
             try:
-                CREDITS.refresh()
-                ARCHIVE.sync_credits(CREDITS.rows)
-            except Exception:
-                pass
+                if CREDITS.refresh():
+                    ARCHIVE.sync_credits(CREDITS.rows)
+                    bump_data_epoch()
+            except Exception as e:
+                log_err('积分刷新异常: %r' % e)
             last_credit = now
         time.sleep(step)
 
@@ -1361,13 +1438,14 @@ class Handler(BaseHTTPRequestHandler):
                     unit = 'hour'
                 if end <= start:
                     end = start + 60000
-                result = aggregate(INDEX, CREDITS, LOGS, ARCHIVE, start, end, unit, now)
+                result = get_aggregate(INDEX, CREDITS, LOGS, ARCHIVE, start, end, unit, now)
                 self._send(200, result)
             except Exception as e:
                 self._send(500, {'error': str(e)})
             return
         if u.path == '/api/meta':
             self._send(200, {
+                'version': VERSION,
                 'traces_dir': TRACES_DIR,
                 'db': DB_PATH,
                 'files': len(INDEX.by_file),
@@ -1435,6 +1513,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             PRICING = build_pricing(ov)
             MODEL_COLOR_OVERRIDES = build_colors(ov)
+            bump_data_epoch()      # 价格/颜色变化影响等价 API 与图表配色
             self._send(200, {'ok': True, 'count': len(ov)})
             return
         if u.path == '/api/settings':
@@ -1450,14 +1529,25 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, {'error': str(e)})
                 return
             SETTINGS = st
+            bump_data_epoch()      # 套餐设置随 meta 下发，需让聚合缓存失效
             self._send(200, {'ok': True, 'settings': st})
             return
         self._send(404, {'error': 'not found'})
 
 
+def flush_caches():
+    """退出前把索引缓存强制落盘（节流窗口内可能仍为 dirty）"""
+    for obj in (INDEX, LOGS):
+        try:
+            if obj is not None:
+                obj.maybe_save_cache(force=True)
+        except Exception as e:
+            log_err('退出前缓存落盘失败: %r' % e)
+
+
 def main():
     global INDEX, CREDITS, LOGS, ARCHIVE
-    print('WorkBuddy Token 看板 — 正在建立索引...')
+    print(f'WorkBuddy Token 看板 v{VERSION} — 正在建立索引...')
     INDEX = UsageIndex()
     LOGS = LogIndex()
     ARCHIVE = Archive()
@@ -1476,10 +1566,19 @@ def main():
     t.start()
     srv = ThreadingHTTPServer(('127.0.0.1', PORT), Handler)
     print(f'  服务已启动: http://127.0.0.1:{PORT}')
+
+    atexit.register(flush_caches)
+    try:
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))   # start.sh stop / restart
+        signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+    except (ValueError, OSError):
+        pass
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        flush_caches()
 
 
 if __name__ == '__main__':
