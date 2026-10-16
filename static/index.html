@@ -459,6 +459,7 @@
               <th class="num sortable" data-sort="rate">命中率<span class="arrow"></span></th>
               <th class="num sortable" data-sort="credits">积分<span class="arrow"></span></th>
               <th class="num sortable" data-sort="cost">等价 API<span class="arrow"></span></th>
+              <th class="num sortable" data-sort="disc" title="折扣 = 该模型的积分价值 ÷ 等价 API；不消耗积分或官方未定价的模型不计算">折扣<span class="arrow"></span></th>
             </tr>
           </thead>
           <tbody id="tbody-models"></tbody>
@@ -1152,12 +1153,22 @@ function renderCredit(d) {
 }
 
 /* --- 模型明细表 --- */
+// 单模型折扣 = 积分价值 ÷ 等价 API（不消耗积分 / 官方未定价的模型返回 null）
+function modelDisc(m) {
+  const cr = m.credits || 0;
+  return (cr > 0 && m.cost > 0) ? cr * CREDIT_CNY / m.cost : null;
+}
+
 function sortModels(models) {
   const { key, dir } = state.sort;
   return models.slice().sort((a, b) => {
     const aAgg = !a.calls, bAgg = !b.calls;   // 「未归属」等聚合行固定排在末尾
     if (aAgg !== bAgg) return aAgg ? 1 : -1;
     if (key === 'm') return a.m.localeCompare(b.m, 'zh') * dir;
+    if (key === 'disc') {
+      const da = modelDisc(a), db = modelDisc(b);
+      return ((da == null ? -Infinity : da) - (db == null ? -Infinity : db)) * dir;
+    }
     const na = a[key] == null ? -Infinity : a[key];
     const nb = b[key] == null ? -Infinity : b[key];
     return (na - nb) * dir;
@@ -1354,7 +1365,7 @@ async function savePricing() {
 function renderTable(d) {
   const tb = $('tbody-models');
   if (!d.models.length) {
-    tb.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-3);padding:22px">该时间段暂无数据</td></tr>';
+    tb.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--text-3);padding:22px">该时间段暂无数据</td></tr>';
     $('table-sub').textContent = '';
     return;
   }
@@ -1373,6 +1384,7 @@ function renderTable(d) {
       + (m.price.kind === 'estimated' ? ' — 估算值' : '');
     else hint = '未配置官方价格的模型';
     const dash = '—';
+    const disc = modelDisc(m);
     return `
     <tr${isAgg ? ' style="opacity:.85"' : ''}>
       <td><span class="m-dot" style="background:${modelColor(m.m)}"></span>${m.m}</td>
@@ -1385,6 +1397,7 @@ function renderTable(d) {
       <td class="num">${isAgg ? dash : `<span class="rate-pill">${m.rate ? fmtPct(m.rate) : '—'}</span>`}</td>
       <td class="num" style="color:var(--amber);${isAgg ? 'cursor:help' : ''}" ${isAgg ? `title="${hint}"` : ''}>${m.credits ? m.credits.toFixed(2) : '—'}</td>
       <td class="num" style="color:${m.cost != null ? 'var(--green)' : 'var(--text-3)'};cursor:${m.cost != null ? 'help' : 'default'}" title="${hint.replace(/"/g, '&quot;')}">${fmtCNY(m.cost)}</td>
+      <td class="num">${disc == null ? dash : `<span class="disc-pill" title="折扣 = 积分价值 ÷ 等价 API">≈${(disc * 10).toFixed(1)} 折</span>`}</td>
     </tr>`; }).join('');
 }
 
