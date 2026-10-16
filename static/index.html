@@ -204,12 +204,6 @@
     background: rgba(52,211,153,.12); color: var(--green);
   }
   .u { font-size: 10px; color: var(--text-3); margin-left: 3px; }
-  .btn-ghost {
-    margin-left: auto; padding: 3px 10px; font-size: 11px; cursor: pointer;
-    background: transparent; border: 1px solid var(--border); border-radius: 6px;
-    color: var(--text-2); font-family: inherit;
-  }
-  .btn-ghost:hover { color: var(--text); border-color: var(--accent); }
 
   /* ---------- 价格调整弹窗 ---------- */
   .modal-mask {
@@ -291,11 +285,6 @@
     background: rgba(52,211,153,.1); color: var(--green);
   }
   .tag.approx { background: rgba(147,161,181,.12); color: var(--text-3); }
-
-  /* ---------- 数据说明 ---------- */
-  .note { font-size: 11.5px; color: var(--text-3); line-height: 1.9; }
-  .note b { color: var(--text-2); font-weight: 500; }
-  .note code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 10.5px; color: var(--text-2); }
 
   footer { margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-3); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
 
@@ -495,7 +484,7 @@
   </div>
 
   <footer>
-    <span>WorkBuddy Token 看板 · 本地运行 · 数据仅来自本机 <code>~/.workbuddy</code></span>
+    <span>WorkBuddy Token 看板 · 本地运行<span id="foot-ver"></span> · 数据仅来自本机 <code>~/.workbuddy</code></span>
     <span id="foot-scan"></span>
   </footer>
 </div>
@@ -612,9 +601,10 @@ const state = {
   interval: 5000,
   metric: 'total',
   lastData: null,
-  bucketCount: -1,
   timer: null,
+  bgTimer: null,        // 页面不可见时的低频轮询计时器
   failCount: 0,
+  nextTryAt: 0,         // 失败退避：早于该时刻的自动轮询直接跳过
   theme: 'dark',
   sort: { key: 'total', dir: -1 },   // 模型明细排序（默认按总计降序）
   sortTask: { key: 't', dir: -1 },   // 任务统计排序（默认按时间倒序）
@@ -705,20 +695,50 @@ function pickUnit(start, end) {
   return 'week';                     // 更宽的范围用周桶（后端还会按桶数上限自动升级）
 }
 
-async function fetchData() {
+const FETCH_TIMEOUT_MS = 15000;   // 单次请求超时（避免服务无响应时界面长时间无反馈）
+const HIDDEN_REFRESH_MS = 30000;  // 页面不可见时的轮询间隔
+
+async function fetchData(force) {
+  if (!force && Date.now() < state.nextTryAt) return;   // 失败退避期内跳过
   const { start, end } = computeRange();
   const unit = pickUnit(start, end);
   const url = `/api/data?start=${start}&end=${end}&unit=${unit}&iv=${state.interval}`;
+  const ctrl = new AbortController();
+  const timeout = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: ctrl.signal });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     state.failCount = 0;
+    state.nextTryAt = 0;
     setLive('on');
     render(data);
   } catch (e) {
     state.failCount++;
-    setLive('err', '连接失败，重试中…');
+    // 指数退避（按当前刷新间隔翻倍，2s ~ 30s 封顶），连接恢复后立即重置
+    const base = state.interval > 0 ? state.interval : 5000;
+    const delay = Math.min(30000, Math.max(2000, base * Math.pow(2, state.failCount - 1)));
+    state.nextTryAt = Date.now() + delay;
+    setLive('err', `连接失败，${Math.round(delay / 1000)}s 后重试…`);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/* 后台标签页降频：不可见时停掉高频轮询、仅保留 30s 低频；回到前台立即刷新并恢复原频率 */
+function onVisibilityChange() {
+  if (document.hidden) {
+    if (state.timer) { clearInterval(state.timer); state.timer = null; }
+    if (state.interval > 0 && !state.bgTimer) {
+      state.bgTimer = setInterval(fetchData, HIDDEN_REFRESH_MS);
+    }
+  } else {
+    if (state.bgTimer) { clearInterval(state.bgTimer); state.bgTimer = null; }
+    if (state.interval > 0 && !state.timer) {
+      state.timer = setInterval(fetchData, state.interval);
+      setLive('on');
+      fetchData(true);   // 回到前台立即取一次最新数据
+    }
   }
 }
 
@@ -854,7 +874,6 @@ function bindExports() {
 }
 
 /* ================= 渲染 ================= */
-let renderCount = 0;
 function render(d) {
   state.lastData = d;
   const k = d.kpi;
@@ -911,10 +930,10 @@ function render(d) {
   renderTable(d);
   renderRequests(d);
   renderTasks(d);
-  renderCount++;
   const from = d.meta.data_from ? fmtDT(d.meta.data_from) : '—';
   const to = d.meta.data_to ? fmtDT(d.meta.data_to) : '—';
   $('src-hint').textContent = `数据覆盖 ${from} ~ ${to}`;
+  $('foot-ver').textContent = d.meta.version ? ` · v${d.meta.version}` : '';
   const sup = d.meta.log_supplement || { n: 0, tokens: 0 };
   let foot = `索引 ${d.meta.files} 文件 / ${fmtInt(d.meta.records_total)} 条调用`;
   if (sup.n) foot += ` · 日志补充 ${sup.n} 条（trace 未落盘，${fmtNum(sup.tokens)} tokens）`;
@@ -1356,7 +1375,7 @@ async function savePricing() {
       return;
     }
     $('pricing-modal').hidden = true;
-    fetchData();   // 重新拉数据：「等价 API」列与积分折算按新配置重算
+    fetchData(true);   // 重新拉数据：「等价 API」列与积分折算按新配置重算
   } catch (e) {
     $('pm-msg').textContent = '保存失败：' + e.message;
   }
@@ -1451,8 +1470,7 @@ function setRange(range) {
     $('dt-start').value = iso(d0);
     $('dt-end').value = iso(now);
   }
-  state.bucketCount = -1;
-  fetchData();
+  fetchData(true);
 }
 function applyCustom() {
   const s = $('dt-start').value, e = $('dt-end').value;
@@ -1460,8 +1478,7 @@ function applyCustom() {
   const st = new Date(s).getTime(), en = new Date(e).getTime();
   if (!(st < en)) { alert('开始时间需早于结束时间'); return; }
   state.custom = { start: st, end: en };
-  state.bucketCount = -1;
-  fetchData();
+  fetchData(true);
 }
 function setInterval_(ms) {
   state.interval = ms;
@@ -1471,12 +1488,14 @@ function setInterval_(ms) {
   if (state.timer) clearInterval(state.timer);
   state.timer = null;
   if (ms > 0) {
-    state.timer = setInterval(fetchData, ms);
+    if (!document.hidden) state.timer = setInterval(fetchData, ms);
+    else if (!state.bgTimer) state.bgTimer = setInterval(fetchData, HIDDEN_REFRESH_MS);
     setLive('on');
-    fetchData();
+    fetchData(true);
   } else {
+    if (state.bgTimer) { clearInterval(state.bgTimer); state.bgTimer = null; }
     setLive('off');
-    fetchData();   // 仍请求一次：把「暂停」同步给服务端（转低频采集）
+    fetchData(true);   // 仍请求一次：把「暂停」同步给服务端（转低频采集）
   }
 }
 
@@ -1562,10 +1581,11 @@ function boot() {
     clearTimeout(rt);
     rt = setTimeout(() => Object.values(charts).forEach(c => c.resize()), 150);
   });
+  document.addEventListener('visibilitychange', onVisibilityChange);
 
   bindExports();
-  fetchData();
-  state.timer = setInterval(fetchData, state.interval);
+  fetchData(true);
+  if (!document.hidden) state.timer = setInterval(fetchData, state.interval);
 }
 boot();
 </script>
