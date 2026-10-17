@@ -1004,12 +1004,34 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
     log_recs = [r for r in recs if r.get('src') == 'log']
 
     # 日志补充：日志里有、trace 缺失的调用。
-    # 按 (模型, 输入, 总量) 多重集与 trace 去重；缓存命中量按区间实测命中率估算。
+    # 按 (模型, 输入, 总量) 多重集与 trace 去重。这类调用的 token 为网关实测值
+    # （与 trace 双源逐条比对 7k+ 条完全一致），仅缓存命中量需要估算：
+    # 口径按「同模型同一天 → 同模型 → 区间整体」逐级回退，尽量贴近实况。
     supplements = []
     if log_recs:
+        day_rate = {}    # (model, day_start) -> [cached, prompt]
+        mdl_rate = {}    # model -> [cached, prompt]
+        for r in trace_recs:
+            a = day_rate.setdefault((r['m'], bucket_start_ms(r['t'], 'day')), [0, 0])
+            a[0] += r['k']
+            a[1] += r['p']
+            b = mdl_rate.setdefault(r['m'], [0, 0])
+            b[0] += r['k']
+            b[1] += r['p']
         tp = sum(r['p'] for r in trace_recs)
         tk = sum(r['k'] for r in trace_recs)
-        cov_rate = (tk / tp) if tp else 0.9
+        global_rate = (tk / tp) if tp else 0.9
+
+        def supp_rate(model, ts):
+            """补充记录的缓存命中率：同日同模型（样本 ≥5 万输入 tokens）→ 同模型 → 全局"""
+            a = day_rate.get((model, bucket_start_ms(ts, 'day')))
+            if a and a[1] >= 50000:
+                return a[0] / a[1]
+            b = mdl_rate.get(model)
+            if b and b[1]:
+                return b[0] / b[1]
+            return global_rate
+
         avail = Counter((r['m'], r['p'], r['p'] + r['c']) for r in trace_recs)
         for lr in log_recs:
             key = (lr['m'], lr['p'], lr['p'] + lr['c'])
@@ -1020,9 +1042,10 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
             if p < 0 or c < 0:
                 continue
             supplements.append({'t': lr['t'], 'm': lr['m'], 'p': p, 'c': c,
-                                'k': int(p * cov_rate), 'r': 0, 'q': lr.get('q'), 'supp': True,
-                                'd': lr.get('d')})
+                                'k': int(p * supp_rate(lr['m'], lr['t'])), 'r': 0,
+                                'q': lr.get('q'), 'supp': True, 'd': lr.get('d')})
     supp_tokens = sum(r['p'] + r['c'] for r in supplements)
+    supp_cached = sum(r['k'] for r in supplements)
     recs = trace_recs + supplements
 
     # 桶生成：起点兜底到数据起点（支持「全部」一类超宽范围）；
@@ -1286,6 +1309,7 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
             'scan': {'last': index.last_scan, 'ms': index.last_scan_ms, 'errors': index.error_files},
             'collect_interval': collect_interval(),
             'log_supplement': {'n': len(supplements), 'tokens': supp_tokens,
+                               'cached': supp_cached,
                                'log_files': len(log_index.by_file) if log_index else 0,
                                'log_records': len(log_index.records) if log_index else 0},
             'credit_precision': {'id': n_id, 'session': len(credit_rows) - n_id,
