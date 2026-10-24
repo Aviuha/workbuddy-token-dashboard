@@ -204,6 +204,7 @@
     background: rgba(52,211,153,.12); color: var(--green);
   }
   .u { font-size: 10px; color: var(--text-3); margin-left: 3px; }
+  .cr-cny { font-size: 10px; color: var(--text-3); white-space: nowrap; }
 
   /* ---------- 价格调整弹窗 ---------- */
   .modal-mask {
@@ -1395,12 +1396,17 @@ function renderTable(d) {
     $('table-sub').textContent = '';
     return;
   }
-  const sig = JSON.stringify([d.models, state.sort]);
+  // 指纹需含套餐单价：积分价值（括号）与折扣列都依赖 CREDIT_CNY，改设置后必须重绘
+  const sig = JSON.stringify([d.models, state.sort, CREDIT_CNY]);
   if (tb.__sig === sig) return;
   tb.__sig = sig;
   const totalCr = d.models.reduce((s, m) => s + m.credits, 0);
   const totalCost = d.models.reduce((s, m) => s + (m.cost || 0), 0);
-  $('table-sub').textContent = `合计积分 ${totalCr.toFixed(2)} · 已定价模型等价 API ${fmtCNY(totalCost)}`;
+  $('table-sub').textContent = `合计积分 ${totalCr.toFixed(2)}（${fmtCNY(totalCr * CREDIT_CNY)}） · 已定价模型等价 API ${fmtCNY(totalCost)}`;
+  const thCr = document.querySelector('#thead-models th[data-sort="credits"]');
+  if (thCr) thCr.title = CREDIT_CNY > 0
+    ? `括号内为积分价值：按当前套餐价折算，1 积分 ≈ ¥${CREDIT_CNY.toFixed(4)}（设置中可改套餐）`
+    : '';
   tb.innerHTML = sortModels(d.models).map(m => {
     const isAgg = !m.calls;   // 「未归属」等聚合行，无对应调用明细
     let hint;
@@ -1421,7 +1427,7 @@ function renderTable(d) {
       <td class="num">${isAgg ? dash : fmtInt(m.total)}</td>
       <td class="num"${!isAgg ? ' title="输出 tokens ÷ 生成耗时，仅统计有耗时记录的调用"' : ''}>${isAgg || m.speed == null ? dash : `${m.speed.toFixed(1)}<span class="u">tok/s</span>`}</td>
       <td class="num">${isAgg ? dash : `<span class="rate-pill">${m.rate ? fmtPct(m.rate) : '—'}</span>`}</td>
-      <td class="num" style="color:var(--amber);${isAgg ? 'cursor:help' : ''}" ${isAgg ? `title="${hint}"` : ''}>${m.credits ? m.credits.toFixed(2) : '—'}</td>
+      <td class="num" style="color:var(--amber);${isAgg ? 'cursor:help' : ''}" ${isAgg ? `title="${hint}"` : ''}>${m.credits ? `${m.credits.toFixed(2)}<span class="cr-cny">（${fmtCNY(m.credits * CREDIT_CNY)}）</span>` : '—'}</td>
       <td class="num" style="color:${m.cost != null ? 'var(--green)' : 'var(--text-3)'};cursor:${m.cost != null ? 'help' : 'default'}" title="${hint.replace(/"/g, '&quot;')}">${fmtCNY(m.cost)}</td>
       <td class="num">${disc == null ? dash : `<span class="disc-pill" title="折扣 = 积分价值 ÷ 等价 API">≈${(disc * 10).toFixed(1)} 折</span>`}</td>
     </tr>`; }).join('');
