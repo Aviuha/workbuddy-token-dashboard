@@ -149,7 +149,11 @@ PRICING_DEFAULTS = {
     },
     'kimi-k3-1': {
         'hit': 2.0, 'miss': 20.0, 'out': 100.0, 'peak_x': 1.0, 'kind': 'official',
-        'src': 'Kimi 开放平台（K3.1 与 K3 同价）',
+        'src': 'Kimi 开放平台（kimi-k3 档位）',
+    },
+    'kimi-k3.1-pro': {
+        'hit': 1.3, 'miss': 13.0, 'out': 68.0, 'peak_x': 1.0, 'kind': 'official',
+        'src': 'Kimi 开放平台（kimi-k3.1-pro，2026-10-23 发布价）',
     },
     'glm-5.3-flash': {
         'hit': 0.23, 'miss': 0.8, 'out': 2.8, 'peak_x': 1.0, 'kind': 'official',
