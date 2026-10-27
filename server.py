@@ -169,7 +169,8 @@ PRICING_DEFAULTS = {
     },
     'hy4-preview': {
         'hit': 0.3, 'miss': 6.0, 'out': 18.0, 'peak_x': 1.0, 'kind': 'official',
-        'src': '腾讯云官方文档（混元 Hy4 preview）',
+        'free_hours': (23, 8),      # 23:00-08:00 不计积分（API 价不受影响）
+        'src': '腾讯云官方文档（混元 Hy4 preview；23:00-08:00 免费）',
     },
     'minimax-m3': {
         'hit': 0.42, 'miss': 2.1, 'out': 8.4, 'peak_x': 1.0, 'kind': 'official',
@@ -290,6 +291,16 @@ def is_peak_cn(ms):
         return False
     hm = dt.hour * 60 + dt.minute
     return (540 <= hm < 720) or (840 <= hm < 1080)
+
+
+def is_free_hour_cn(ms, window):
+    """是否落在「不计积分」的免费时段（北京时间，左闭右开，支持跨零点）
+    window = (23, 8) 表示 23:00 至次日 08:00。仅影响积分比对，不影响 token 与等价 API"""
+    if not window:
+        return False
+    frm, to = window
+    h = datetime.fromtimestamp(ms / 1000, CN_TZ).hour
+    return (h >= frm or h < to) if frm > to else (frm <= h < to)
 
 
 def parse_iso_ms(s):
@@ -1094,9 +1105,13 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
             mult = price['peak_x'] if (price['peak_x'] > 1 and is_peak_cn(r['t'])) else 1.0
             cost = (r['k'] * price['hit'] + fresh * price['miss'] + r['c'] * price['out']) * mult / 1e6
             kpi['cost'] += cost
+        # 免费时段（如 hy4 夜间免费）的用量不计积分，做积分比对时要从分母里去掉
+        paid_cost = cost
+        if price and price.get('free_hours') and is_free_hour_cn(r['t'], price['free_hours']):
+            paid_cost = 0.0
         m = models.setdefault(r['m'], {'m': r['m'], 'calls': 0, 'p': 0, 'k': 0, 'c': 0,
                                        'reason': 0, 'credits': 0.0, 'credit_reqs': 0,
-                                       'cost': 0.0, 'first': r['t'], 'last': r['t'],
+                                       'cost': 0.0, 'paid_cost': 0.0, 'first': r['t'], 'last': r['t'],
                                        'out_dur': 0, 'out_tok': 0})
         m['calls'] += 1
         m['p'] += r['p']
@@ -1104,6 +1119,7 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
         m['c'] += r['c']
         m['reason'] += r['r']
         m['cost'] += cost
+        m['paid_cost'] += paid_cost
         if r.get('d'):      # 生成速度：仅统计有耗时记录的调用（输出 tokens ÷ 生成时长）
             m['out_dur'] += r['d']
             m['out_tok'] += r['c']
@@ -1333,6 +1349,7 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
             'rate': (m['k'] / m['p']) if m['p'] else 0.0,
             'credits': round(m['credits'], 4), 'credit_reqs': m['credit_reqs'],
             'cost': round(m['cost'], 4) if m['m'] in PRICING else None,
+            'paid_cost': round(m['paid_cost'], 4) if m['m'] in PRICING else None,
             'price': PRICING.get(m['m']),
             'color': MODEL_COLOR_OVERRIDES.get(m['m']),
             'speed': round(m.get('out_tok', 0) / (m.get('out_dur', 0) / 1000.0), 1) if m.get('out_dur') else None,

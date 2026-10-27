@@ -451,7 +451,7 @@
               <th class="num sortable" data-sort="rate">命中率<span class="arrow"></span></th>
               <th class="num sortable" data-sort="credits">积分<span class="arrow"></span></th>
               <th class="num sortable" data-sort="cost">等价 API<span class="arrow"></span></th>
-              <th class="num sortable" data-sort="disc" title="折扣 = 该模型的积分价值 ÷ 等价 API；不消耗积分或官方未定价的模型不计算">折扣<span class="arrow"></span></th>
+              <th class="num sortable" data-sort="disc" title="折扣 = 该模型的积分价值 ÷ 收费时段等价 API；夜间免费的模型已扣除免费时段用量；不消耗积分或官方未定价的模型不计算">折扣<span class="arrow"></span></th>
             </tr>
           </thead>
           <tbody id="tbody-models"></tbody>
@@ -934,7 +934,7 @@ function render(d) {
   let dNum = 0, dDen = 0;
   (d.models || []).forEach(m => {
     const cr = m.credits || 0;
-    const c = m.cost;
+    const c = paidCost(m);
     if (cr > 0 && c > 0) {
       dNum += cr * CREDIT_CNY;
       dDen += c;
@@ -944,7 +944,7 @@ function render(d) {
     const disc = dNum / dDen;
     discEl.hidden = false;
     discEl.textContent = `≈${(disc * 10).toFixed(1)} 折`;
-    discEl.title = `套餐折扣 = 消耗积分模型的积分价值 ÷ 其等价 API = ${(disc * 100).toFixed(1)}%（当前时间范围）\n不消耗积分的调用（自带 Key 等）与官方未定价模型不参与折算`;
+    discEl.title = `套餐折扣 = 消耗积分模型的积分价值 ÷ 其收费时段等价 API = ${(disc * 100).toFixed(1)}%（当前时间范围）\n不消耗积分的调用（自带 Key 等）、夜间免费的时段与官方未定价模型不参与折算`;
   } else {
     discEl.hidden = true;
   }
@@ -1206,9 +1206,14 @@ function renderCredit(d) {
 
 /* --- 模型明细表 --- */
 // 单模型折扣 = 积分价值 ÷ 等价 API（不消耗积分 / 官方未定价的模型返回 null）
+// 有夜间免费时段的模型用「收费时段」成本做分母，免费时段的用量不进比对
+function paidCost(m) {
+  return (m.paid_cost != null) ? m.paid_cost : m.cost;
+}
 function modelDisc(m) {
   const cr = m.credits || 0;
-  return (cr > 0 && m.cost > 0) ? cr * CREDIT_CNY / m.cost : null;
+  const den = paidCost(m);
+  return (cr > 0 && den > 0) ? cr * CREDIT_CNY / den : null;
 }
 
 function sortModels(models) {
@@ -1454,7 +1459,7 @@ function renderTable(d) {
       <td class="num">${isAgg ? dash : `<span class="rate-pill">${m.rate ? fmtPct(m.rate) : '—'}</span>`}</td>
       <td class="num" style="color:var(--amber);${isAgg ? 'cursor:help' : ''}" ${isAgg ? `title="${hint}"` : ''}>${m.credits ? `${m.credits.toFixed(2)}<span class="cr-cny">（${fmtCNY(m.credits * CREDIT_CNY)}）</span>` : '—'}</td>
       <td class="num" style="color:${m.cost != null ? 'var(--green)' : 'var(--text-3)'};cursor:${m.cost != null ? 'help' : 'default'}" title="${hint.replace(/"/g, '&quot;')}">${fmtCNY(m.cost)}</td>
-      <td class="num">${disc == null ? dash : `<span class="disc-pill" title="折扣 = 积分价值 ÷ 等价 API">≈${(disc * 10).toFixed(1)} 折</span>`}</td>
+      <td class="num">${disc == null ? dash : `<span class="disc-pill" title="折扣 = 积分价值 ÷ 收费时段等价 API${m.price && m.price.free_hours ? '（已扣除夜间免费时段）' : ''}">≈${(disc * 10).toFixed(1)} 折</span>`}</td>
     </tr>`; }).join('');
 }
 
@@ -1494,20 +1499,28 @@ function renderUnitPrice(d) {
     const mtokens = (m.p + m.k + m.c) / 1e6;
     const blended = mtokens > 0 ? m.credits / mtokens : null;
     const pr = m.price;
-    // 积分/¥ = 该模型实际消耗积分 ÷ 其等价 API 成本；再乘官方各档单价 → 每百万 tokens 所需积分
-    const beta = (pr && m.cost > 0) ? m.credits / m.cost : null;
+    // 积分/¥ = 该模型实际消耗积分 ÷ 其「收费时段」等价 API 成本；再乘官方各档单价 → 每百万 tokens 所需积分
+    const pc = paidCost(m);
+    const beta = (pr && pc > 0) ? m.credits / pc : null;
     const cell3 = v => (beta == null ? '<span class="unit-na">—</span>' : fmtCredUnit(v));
     const api = pr
       ? `${fmtApiPrice(pr.miss)} / ${fmtApiPrice(pr.hit)} / ${fmtApiPrice(pr.out)}`
       : '<span class="unit-na">未定价</span>';
-    const rowTitle = beta != null
-      ? `按该模型实测：每 1 元官方价约消耗 ${beta.toFixed(2)} 积分`
-      : (pr
-        ? '该模型有官方价，但当前范围内没有可用的等价 API 成本，无法反推三档单价'
-        : '官方未公布该模型价格，无法按三档拆分，只给综合平均');
+    const freeTag = (pr && pr.free_hours) ? ' <span class="tag approx">夜间免费</span>' : '';
+    let rowTitle;
+    if (beta != null) {
+      rowTitle = `按该模型实测：每 1 元官方价约消耗 ${beta.toFixed(2)} 积分`;
+      if (pr.free_hours) rowTitle += `；夜间 ${String(pr.free_hours[0]).padStart(2, '0')}:00-${String(pr.free_hours[1]).padStart(2, '0')}:00 不计积分，单价按收费时段反推`;
+    } else if (pr) {
+      rowTitle = pr.free_hours
+        ? '该范围内用量全在免费时段，没有可比的积分消耗'
+        : '该模型有官方价，但当前范围内没有可用的等价 API 成本，无法反推三档单价';
+    } else {
+      rowTitle = '官方未公布该模型价格，无法按三档拆分，只给综合平均';
+    }
     return `
     <tr title="${rowTitle.replace(/"/g, '&quot;')}">
-      <td><span class="m-dot" style="background:${modelColor(m.m)}"></span>${m.m}${pr ? '' : ' <span class="tag approx">未定价</span>'}</td>
+      <td><span class="m-dot" style="background:${modelColor(m.m)}"></span>${m.m}${pr ? freeTag : ' <span class="tag approx">未定价</span>'}</td>
       <td class="num">${cell3(beta == null ? null : beta * pr.miss)}</td>
       <td class="num">${cell3(beta == null ? null : beta * pr.hit)}</td>
       <td class="num">${cell3(beta == null ? null : beta * pr.out)}</td>
@@ -1518,7 +1531,8 @@ function renderUnitPrice(d) {
 
   $('unit-sub').textContent = `单位：积分 / 百万 tokens · ${list.length} 个模型（${split} 个可拆分三档）`;
   $('unit-note').innerHTML =
-    '积分单价 = 该模型实际消耗积分 ÷ 其等价 API 成本 × 官方对应档单价；DeepSeek 按闲时基价折算，高峰时段的 ×2 已反映在实测比例里。' +
+    '积分单价 = 该模型实际消耗积分 ÷ 其「收费时段」等价 API 成本 × 官方对应档单价；DeepSeek 按闲时基价折算，高峰时段的 ×2 已反映在实测比例里。' +
+    '<br>夜间免费（如 hy4-preview 23:00-08:00）的用量不计积分，因此从积分比对的分母中剔除，其 token 与等价 API 仍照常统计。' +
     '<br>「综合」= 总积分 ÷ 总 tokens，受各模型缓存命中比例影响，与三档单价不可互推；官方未公布价格的模型只给综合值。';
 }
 
