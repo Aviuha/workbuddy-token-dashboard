@@ -208,6 +208,20 @@
   .unit-note { font-size: 11px; color: var(--text-3); padding: 10px 10px 2px; line-height: 1.7; }
   .unit-na { color: var(--text-3); }
 
+  /* ---------- 更新检查 ---------- */
+  .up-status { font-size: 12px; line-height: 1.8; }
+  .up-badge { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 99px; margin-right: 8px; }
+  .up-badge.ok { background: rgba(52,211,153,.12); color: var(--green); }
+  .up-badge.new { background: rgba(245,183,77,.14); color: var(--amber); }
+  .up-badge.err { background: rgba(248,113,113,.14); color: var(--red); }
+  .up-meta { color: var(--text-3); font-size: 11px; margin-top: 8px; line-height: 1.8; word-break: break-all; }
+  .up-list { margin-top: 10px; border-top: 1px solid var(--line); }
+  .up-item { display: flex; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 12px; align-items: baseline; }
+  .up-item code { color: var(--text-3); font-size: 11px; flex-shrink: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .up-cmd { margin-top: 10px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 10px; font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--text-2); user-select: all; line-height: 1.8; }
+
   /* ---------- 价格调整弹窗 ---------- */
   .modal-mask {
     position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 100;
@@ -359,6 +373,10 @@
     <button class="btn-export-all" id="btn-settings" title="设置：积分套餐、模型价格与颜色">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h9M17.5 6H20M4 12h2.5M11 12h9M4 18h6.5M14.5 18H20"/><circle cx="15" cy="6" r="2.2"/><circle cx="8.5" cy="12" r="2.2"/><circle cx="12" cy="18" r="2.2"/></svg>
       设置
+    </button>
+    <button class="btn-export-all" id="btn-update" title="检查 GitHub 上是否有新版本（只读，不会修改任何文件）">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v4h-4"/></svg>
+      <span id="btn-update-label">检查更新</span>
     </button>
   </div>
 
@@ -551,6 +569,23 @@
   </div>
 </div>
 
+<div class="modal-mask" id="update-modal" hidden>
+  <div class="modal" style="width:min(620px,94vw)">
+    <div class="modal-head">
+      <h3>检查更新</h3>
+      <span class="modal-sub">只读检查 GitHub 上的最新提交，不修改任何文件；数据目录 <code>data/</code> 始终不受影响。</span>
+    </div>
+    <div class="modal-body">
+      <div class="up-status" id="up-body">正在检查…</div>
+    </div>
+    <div class="modal-foot">
+      <span class="msg" id="up-msg"></span>
+      <button class="btn-plain" id="up-recheck">重新检查</button>
+      <button class="btn-plain" id="up-close">关闭</button>
+    </div>
+  </div>
+</div>
+
 <script src="/static/echarts.min.js"></script>
 <script src="/static/html2canvas.min.js"></script>
 <script>
@@ -626,6 +661,7 @@ const state = {
   interval: 5000,
   metric: 'total',
   lastData: null,
+  token: null,          // 写操作令牌（服务端每次启动生成，随 meta 下发）
   timer: null,
   bgTimer: null,        // 页面不可见时的低频轮询计时器
   failCount: 0,
@@ -901,6 +937,7 @@ function bindExports() {
 /* ================= 渲染 ================= */
 function render(d) {
   state.lastData = d;
+  if (d.meta && d.meta.token) state.token = d.meta.token;
   const k = d.kpi;
   // 同步「设置」里的积分套餐单价（服务端随 meta 下发）
   if (d.meta && d.meta.settings && d.meta.settings.credit_cny > 0 && d.meta.settings.credit_quota > 0) {
@@ -1391,22 +1428,14 @@ async function savePricing() {
   }
   try {
     // 1) 积分套餐
-    const rs = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings: { credit_cny: cny, credit_quota: quota } }),
-    });
+    const rs = await postJSON('/api/settings', { settings: { credit_cny: cny, credit_quota: quota } });
     const ds = await rs.json();
     if (!rs.ok || ds.error) {
       $('pm-msg').textContent = '保存失败：' + (ds.error || rs.status);
       return;
     }
     // 2) 模型价格与颜色
-    const res = await fetch('/api/pricing', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ overrides: pmState.overrides }),
-    });
+    const res = await postJSON('/api/pricing', { overrides: pmState.overrides });
     const d = await res.json();
     if (!res.ok || d.error) {
       $('pm-msg').textContent = '保存失败：' + (d.error || res.status);
@@ -1615,6 +1644,96 @@ function setInterval_(ms) {
   }
 }
 
+/* ================= 在线更新（当前为只读检查） ================= */
+function postJSON(url, payload) {
+  // 写操作统一带令牌：服务端每次启动重新生成，页面从 meta 取得
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-WB-Token': state.token || '' },
+    body: JSON.stringify(payload),
+  });
+}
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function shortSha(s) { return (s || '').slice(0, 7); }
+function agoText(ms) {
+  if (!ms) return '—';
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 60) return s + ' 秒前';
+  if (s < 3600) return Math.round(s / 60) + ' 分钟前';
+  return Math.round(s / 3600) + ' 小时前';
+}
+function setUpdateLabel(text, cls) {
+  const el = $('btn-update-label');
+  if (el) el.textContent = text;
+  const btn = $('btn-update');
+  if (btn) btn.dataset.state = cls || '';
+}
+async function checkUpdate() {
+  const body = $('up-body');
+  const msg = $('up-msg');
+  if (msg) msg.textContent = '';
+  body.innerHTML = '<span class="up-badge ok">检查中</span>正在读取远端提交…';
+  setUpdateLabel('检查中…', 'busy');
+  let d;
+  try {
+    const res = await fetch('/api/update/check', { cache: 'no-store' });
+    d = await res.json();
+  } catch (e) {
+    body.innerHTML = '<span class="up-badge err">失败</span>无法访问本地服务。';
+    setUpdateLabel('检查更新', 'err');
+    return;
+  }
+  renderUpdate(d);
+}
+function renderUpdate(d) {
+  const body = $('up-body');
+  const esc = escHtml;
+  if (!d || d.is_git === false) {
+    body.innerHTML = '<span class="up-badge err">不可用</span>' + esc(d && d.reason ? d.reason : '不是 git 仓库')
+      + '<div class="up-meta">在线更新依赖 git 仓库，请用 <code>git clone</code> 安装后再使用。</div>';
+    setUpdateLabel('检查更新', 'err');
+    return;
+  }
+  if (d.error && d.ok !== true) {
+    body.innerHTML = '<span class="up-badge err">失败</span>' + esc(d.error)
+      + '<div class="up-meta">本地 ' + esc(shortSha(d.head)) + ' · 检查于 ' + agoText(d.checked_at) + '</div>';
+    setUpdateLabel('检查更新', 'err');
+    return;
+  }
+  const head = '<div class="up-meta">当前 v' + esc(d.version) + ' · <code>' + esc(shortSha(d.head))
+    + '</code> · 远端 <code>' + esc(shortSha(d.remote_head)) + '</code>（' + esc(d.branch) + '）· 检查于 '
+    + agoText(d.checked_at) + '</div>';
+  if (d.up_to_date) {
+    body.innerHTML = '<span class="up-badge ok">已是最新</span>没有需要更新的提交。' + head;
+    setUpdateLabel('已是最新', 'ok');
+    return;
+  }
+  const commits = (d.commits || []).map(c =>
+    '<div class="up-item"><code>' + esc(c.sha) + '</code><span>' + esc(c.subject) + '</span></div>').join('');
+  const files = (d.files || []).length
+    ? '<div class="up-meta">涉及文件：' + d.files.map(f => '<code>' + esc(f) + '</code>').join('、') + '</div>' : '';
+  const stat = d.diffstat ? '<div class="up-meta">' + esc(d.diffstat) + '</div>' : '';
+  body.innerHTML =
+    '<span class="up-badge new">有新版本</span>落后 ' + (d.behind || (d.commits || []).length) + ' 个提交。'
+    + head + stat
+    + '<div class="up-list">' + commits + '</div>' + files
+    + '<div class="up-cmd">cd ' + esc(d.repo_path || '<项目目录>') + ' &amp;&amp; git pull &amp;&amp; ./start.sh restart</div>'
+    + '<div class="up-meta">当前版本为只读检查，不会自动安装。执行上面两条命令即可完成更新（Windows 用 start.bat restart）。</div>';
+  setUpdateLabel('有新版本', 'new');
+  if (d.dirty && d.dirty.length) {
+    body.insertAdjacentHTML('beforeend',
+      '<div class="up-meta" style="color:var(--amber)">注意：工作区有 ' + d.dirty.length
+      + ' 处未提交改动，直接 git pull 可能冲突。</div>');
+  }
+}
+function openUpdate() {
+  $('update-modal').hidden = false;
+  checkUpdate();
+}
+
 /* ================= 启动 ================= */
 function boot() {
   initCharts();
@@ -1660,6 +1779,12 @@ function boot() {
   $('btn-apply').addEventListener('click', applyCustom);
   // 价格调整弹窗
   $('btn-settings').addEventListener('click', openPricing);
+  $('btn-update').addEventListener('click', openUpdate);
+  $('up-close').addEventListener('click', () => { $('update-modal').hidden = true; });
+  $('up-recheck').addEventListener('click', checkUpdate);
+  $('update-modal').addEventListener('click', e => {
+    if (e.target === $('update-modal')) $('update-modal').hidden = true;
+  });
   $('set-cny').addEventListener('input', updateSetEq);
   $('set-quota').addEventListener('input', updateSetEq);
   $('pm-cancel').addEventListener('click', () => { $('pricing-modal').hidden = true; });

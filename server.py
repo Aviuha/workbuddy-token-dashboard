@@ -19,8 +19,11 @@ import bisect
 import json
 import os
 import re
+import secrets
 import signal
+import socket
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -84,7 +87,7 @@ STATIC_DIR = os.path.join(BASE, 'static')
 CACHE_FILE = os.path.join(BASE, 'data', 'index-cache.json')
 LOG_CACHE_FILE = os.path.join(BASE, 'data', 'log-index-cache.json')
 PORT = 8899
-VERSION = '1.1.0'
+VERSION = '1.2.0'
 
 LOCAL_TZ = datetime.now().astimezone().tzinfo
 CN_TZ = timezone(timedelta(hours=8))          # 北京时间，用于峰谷判定
@@ -128,6 +131,240 @@ DATA_EPOCH = {'v': 1}
 
 def bump_data_epoch():
     DATA_EPOCH['v'] += 1
+
+
+# ================= P0：本地访问安全（Host / 来源 / 写操作令牌 / 审计） =================
+# 威胁模型说明：
+#   1) DNS rebinding —— 恶意域名解析到 127.0.0.1，浏览器认为同源，会带上该域名作 Host。
+#      用 Host 白名单（回环 / 私网 / 虚拟局域网网段）挡住；Tailscale(100.64/10)、
+#      ZeroTier(10/8、172.16/12)、mDNS 均可放行，公网地址一律拒绝。
+#   2) 跨站请求伪造 —— 任何网页都能向 127.0.0.1 发简单请求。写操作必须带
+#      每次启动随机生成的令牌（页面从 /api/meta 取得）与同源 Origin。
+#   3) 审计 —— 写操作与拦截事件落 data/audit.log，便于事后排查。
+SESSION_TOKEN = secrets.token_urlsafe(24)      # 每次启动重新生成，页面刷新后需重新获取
+AUDIT_FILE = os.path.join(BASE, 'data', 'audit.log')
+AUDIT_MAX_BYTES = 1 << 20                      # 1 MB 后轮转一次
+_HOST_CACHE = {}                               # 主机名 → (是否私网, 过期时间)
+
+
+def _ip_is_local(ip):
+    """回环 + 私网 + CGNAT（Tailscale 用 100.64/10）。解析失败返回 False。"""
+    try:
+        addr = socket.inet_pton(socket.AF_INET, ip)
+    except OSError:
+        addr = None
+    if addr:
+        a, b = addr[0], addr[1]
+        return (a == 127                                  # 127/8 回环
+                or (a == 10)                              # 10/8
+                or (a == 192 and b == 168)                # 192.168/16
+                or (a == 172 and 16 <= b <= 31)           # 172.16/12
+                or (a == 100 and 64 <= b <= 127)          # 100.64/10 CGNAT / Tailscale
+                or a == 169 and b == 254)                 # 169.254/16 链路本地
+    try:
+        addr6 = socket.inet_pton(socket.AF_INET6, ip)
+    except OSError:
+        return False
+    if addr6[0] == 0 and addr6[15] == 1:                  # ::1
+        return True
+    if (addr6[0] & 0xfe) == 0xfc:                         # fc00::/7 唯一本地
+        return True
+    if addr6[0] == 0xfe and (addr6[1] & 0xc0) == 0x80:    # fe80::/10 链路本地
+        return True
+    # IPv4 映射地址 ::ffff:a.b.c.d
+    if addr6[:10] == b'\x00' * 10 and addr6[10:12] == b'\xff\xff':
+        return _ip_is_local(socket.inet_ntoa(addr6[12:]))
+    return False
+
+
+def _host_name_ok(name):
+    """主机名是否指向本地/私网。结果缓存 60 秒，避免每次请求都解析。"""
+    name = (name or '').strip().strip('[]').lower()
+    if not name:
+        return True                                   # 无 Host（HTTP/1.0 / 本地脚本）：交给令牌兜底
+    if name in ('localhost', 'localhost.localdomain'):
+        return True
+    cached = _HOST_CACHE.get(name)
+    now = time.time()
+    if cached and cached[1] > now:
+        return cached[0]
+    if _ip_is_local(name):
+        ok = True
+    elif re.match(r'^[0-9a-f:.]+$', name):            # 是 IP 但不是私网
+        ok = False
+    else:                                             # 域名：解析后判断（MagicDNS / mDNS 走这条）
+        try:
+            infos = socket.getaddrinfo(name, None, proto=socket.IPPROTO_TCP)
+            ips = {i[4][0] for i in infos}
+            ok = bool(ips) and all(_ip_is_local(ip) for ip in ips)
+        except Exception:
+            ok = False
+    _HOST_CACHE[name] = (ok, now + 60)
+    return ok
+
+
+def audit(event, **fields):
+    """写操作与拦截事件留痕（JSON Lines，超 1 MB 轮转一份 .1）"""
+    try:
+        os.makedirs(os.path.dirname(AUDIT_FILE), exist_ok=True)
+        try:
+            if os.path.getsize(AUDIT_FILE) > AUDIT_MAX_BYTES:
+                os.replace(AUDIT_FILE, AUDIT_FILE + '.1')
+        except OSError:
+            pass
+        rec = {'t': int(time.time() * 1000), 'event': event}
+        rec.update({k: v for k, v in fields.items() if v is not None})
+        with open(AUDIT_FILE, 'a', encoding='utf-8') as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + '\n')
+    except Exception as e:
+        log_err('审计日志写入失败: %r' % e)
+
+
+# ================= P1：在线更新检查（只读，不改任何文件） =================
+UPDATE_REMOTE = 'https://github.com/Aviuha/workbuddy-token-dashboard.git'
+UPDATE_BRANCH = 'main'
+GIT_TIMEOUT = 20
+
+# 数据格式标记：写入 data/schema.json。更新代码时据此判断 data/ 是否由更高版本写过，
+# 避免「用旧代码去读新结构」导致看板异常。data/ 里的归档库与缓存永不删除。
+DATA_SCHEMA = 1
+SCHEMA_FILE = os.path.join(BASE, 'data', 'schema.json')
+
+
+def ensure_data_schema():
+    """首次运行写入 data/schema.json；已有更高版本标记时报警（不覆盖、不清库）"""
+    try:
+        with open(SCHEMA_FILE, encoding='utf-8') as fh:
+            old = json.load(fh)
+        if not isinstance(old, dict):
+            old = {}
+    except Exception:
+        old = None
+    if old is None:
+        rec = {'schema': DATA_SCHEMA, 'app_version': VERSION,
+               'written_at': int(time.time() * 1000)}
+        try:
+            os.makedirs(os.path.dirname(SCHEMA_FILE), exist_ok=True)
+            with open(SCHEMA_FILE, 'w', encoding='utf-8') as fh:
+                json.dump(rec, fh, ensure_ascii=False, indent=1)
+            print('  数据格式标记: schema %d（首次写入 data/schema.json）' % DATA_SCHEMA)
+        except Exception as e:
+            log_err('写入 data/schema.json 失败: %r' % e)
+        return DATA_SCHEMA
+    old_schema = old.get('schema')
+    try:
+        old_schema = int(old_schema)
+    except (TypeError, ValueError):
+        old_schema = DATA_SCHEMA
+    if old_schema > DATA_SCHEMA:
+        log_err('data/schema.json 记录 schema=%d，高于本代码支持的 %d：'
+                '这批数据可能由更新版本写入，请升级代码；数据不会被删除或改写'
+                % (old_schema, DATA_SCHEMA))
+    else:
+        # 版本号变化时刷新标记，但 schema 值只升不降
+        try:
+            old['schema'] = DATA_SCHEMA
+            old['app_version'] = VERSION
+            old['written_at'] = int(time.time() * 1000)
+            with open(SCHEMA_FILE, 'w', encoding='utf-8') as fh:
+                json.dump(old, fh, ensure_ascii=False, indent=1)
+        except Exception as e:
+            log_err('刷新 data/schema.json 失败: %r' % e)
+    return old_schema
+
+
+
+def _norm_remote(url):
+    u = (url or '').strip().rstrip('/')
+    if u.endswith('.git'):
+        u = u[:-4]
+    return u.lower()
+
+
+def _git(*args, timeout=GIT_TIMEOUT):
+    """在仓库根执行 git。返回 (ok, stdout, stderr)；不弹交互式凭据。"""
+    try:
+        p = subprocess.run(['git', '-C', BASE] + list(args), capture_output=True, text=True,
+                           timeout=timeout,
+                           env={**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GIT_ASKPASS': 'true'})
+    except FileNotFoundError:
+        return False, '', '未找到 git 命令'
+    except subprocess.TimeoutExpired:
+        return False, '', 'git 执行超时（%ds）' % timeout
+    except Exception as e:
+        return False, '', repr(e)
+    if p.returncode != 0:
+        return False, p.stdout or '', (p.stderr or '').strip()
+    return True, p.stdout or '', (p.stderr or '').strip()
+
+
+def repo_state():
+    """仓库基本情况：是否 git、origin 是否官方、HEAD、待提交改动"""
+    ok, out, _ = _git('rev-parse', '--is-inside-work-tree')
+    if not ok or out.strip() != 'true':
+        return {'is_git': False}
+    _, origin, _ = _git('remote', 'get-url', 'origin')
+    _, head, _ = _git('rev-parse', 'HEAD')
+    _, dirty, _ = _git('status', '--porcelain')
+    return {
+        'is_git': True,
+        'origin': (origin or '').strip(),
+        'origin_ok': _norm_remote(origin) == _norm_remote(UPDATE_REMOTE),
+        'head': (head or '').strip(),
+        'dirty': [ln for ln in (dirty or '').splitlines() if ln.strip()][:20],
+    }
+
+
+def update_check():
+    """只读检查：不 fetch、不改工作区。远端 SHA 用 ls-remote 取得（不占 GitHub API 配额）"""
+    info = repo_state()
+    out = {'version': VERSION, 'branch': UPDATE_BRANCH, 'remote': UPDATE_REMOTE,
+           'repo_path': BASE,
+           'checked_at': int(time.time() * 1000), 'is_git': info.get('is_git', False)}
+    if not out['is_git']:
+        out.update({'ok': False, 'reason': '当前目录不是 git 仓库，无法在线更新（请用 git clone 安装）'})
+        return out
+    out.update({'origin': info['origin'], 'origin_ok': info['origin_ok'],
+                'head': info['head'], 'dirty': info['dirty'],
+                'behind': 0, 'commits': [], 'up_to_date': None, 'error': None})
+    if not info['origin_ok']:
+        out.update({'ok': False, 'error': 'origin 不是官方仓库：%s' % info['origin']})
+        return out
+    ok, ls, err = _git('ls-remote', 'origin', 'refs/heads/' + UPDATE_BRANCH)
+    if not ok:
+        out.update({'ok': False, 'error': '无法连接远端：%s' % (err or '未知错误')})
+        return out
+    remote_sha = ''
+    for line in ls.splitlines():
+        parts = line.split('\t')
+        if len(parts) == 2 and parts[1].endswith(UPDATE_BRANCH):
+            remote_sha = parts[0].strip()
+    if not remote_sha:
+        out.update({'ok': False, 'error': '远端未返回 %s 分支' % UPDATE_BRANCH})
+        return out
+    out['remote_head'] = remote_sha
+    out['up_to_date'] = (remote_sha == info['head'])
+    out['ok'] = True
+    if not out['up_to_date']:
+        # 只为拿提交列表做一次 fetch（只动 .git，不改工作区）
+        ok2, _, err2 = _git('fetch', '--quiet', 'origin', UPDATE_BRANCH, timeout=30)
+        if ok2:
+            _, log, _ = _git('log', '--oneline', '--no-decorate',
+                             'HEAD..origin/' + UPDATE_BRANCH)
+            commits = []
+            for ln in (log or '').splitlines()[:20]:
+                sha, _, subject = ln.partition(' ')
+                commits.append({'sha': sha, 'subject': subject})
+            out['commits'] = commits
+            out['behind'] = len([ln for ln in (log or '').splitlines() if ln.strip()])
+            _, stat, _ = _git('diff', '--shortstat', 'HEAD..origin/' + UPDATE_BRANCH)
+            out['diffstat'] = (stat or '').strip()
+            _, files, _ = _git('diff', '--name-only', 'HEAD..origin/' + UPDATE_BRANCH)
+            out['files'] = [f for f in (files or '').splitlines() if f.strip()][:30]
+        else:
+            out['error'] = '已发现新版本，但获取提交列表失败：%s' % (err2 or '未知错误')
+    return out
+
 
 
 RID_TIME_TOLERANCE = 6 * 3600 * 1000   # span 时间与 requestId 时间戳的最大容忍差
@@ -1342,6 +1579,7 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
         'now': now_ms,
         'meta': {
             'version': VERSION,
+            'token': SESSION_TOKEN,          # 写操作令牌（每次启动重新生成）
             'range': {'start': start_ms, 'end': end_ms, 'unit': unit, 'buckets': n_buckets},
             'data_from': all_recs[0]['t'] if all_recs else None,
             'data_to': all_recs[-1]['t'] if all_recs else None,
@@ -1481,12 +1719,57 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+    def _host_header_name(self):
+        """从 Host 头取出主机名（兼容 IPv6 的 [::1]:8899 写法）"""
+        host = self.headers.get('Host') or ''
+        m = re.match(r'^\[(.+)\](?::\d+)?$', host)
+        if m:
+            return m.group(1)
+        return host.rsplit(':', 1)[0] if host.count(':') == 1 else host
+
+    def _guard(self, write=False):
+        """Host 白名单（防 DNS rebinding）；写操作另需令牌 + 同源 Origin"""
+        ip = self.client_address[0] if self.client_address else None
+        host = self.headers.get('Host')
+        if not _host_name_ok(self._host_header_name()):
+            audit('block_host', host=host, path=self.path, ip=ip)
+            self._send(403, {'error': 'Host 不在允许范围：仅支持本机、私网与虚拟局域网地址访问'})
+            return False
+        if not write:
+            return True
+        token = self.headers.get('X-WB-Token') or ''
+        if not token or not secrets.compare_digest(token, SESSION_TOKEN):
+            audit('block_token', host=host, path=self.path, ip=ip)
+            self._send(403, {'error': '缺少或无效的访问令牌，请刷新页面后重试'})
+            return False
+        origin = self.headers.get('Origin')
+        if origin and origin != 'null':
+            o = urlparse(origin)
+            if (o.netloc or '').lower() != (host or '').lower():
+                audit('block_origin', origin=origin, host=host, path=self.path, ip=ip)
+                self._send(403, {'error': '请求来源与本站不一致'})
+                return False
+        return True
+
     def do_GET(self):
+        if not self._guard():
+            return
         u = urlparse(self.path)
         qs = parse_qs(u.query)
         if u.path == '/favicon.ico':
             self.send_response(204)
             self.end_headers()
+            return
+        if u.path == '/api/update/check':
+            try:
+                res = update_check()
+            except Exception as e:
+                log_err('更新检查失败: %r' % e)
+                res = {'ok': False, 'error': '更新检查异常：%s' % e}
+            if res.get('error') and not res.get('ok'):
+                audit('update_check_error', error=res.get('error'),
+                      ip=self.client_address[0] if self.client_address else None)
+            self._send(200, res)
             return
         if u.path == '/api/data':
             try:
@@ -1513,6 +1796,8 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == '/api/meta':
             self._send(200, {
                 'version': VERSION,
+                'token': SESSION_TOKEN,
+                'data_schema': DATA_SCHEMA,
                 'traces_dir': TRACES_DIR,
                 'db': DB_PATH,
                 'files': len(INDEX.by_file),
@@ -1558,7 +1843,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, {'error': 'read fail'})
 
     def do_POST(self):
+        if not self._guard(write=True):
+            return
         u = urlparse(self.path)
+        if self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/json':
+            self._send(415, {'error': '请求体必须是 application/json'})
+            return
         try:
             length = int(self.headers.get('Content-Length') or 0)
             raw = self.rfile.read(length) if length else b'{}'
@@ -1581,6 +1871,8 @@ class Handler(BaseHTTPRequestHandler):
             PRICING = build_pricing(ov)
             MODEL_COLOR_OVERRIDES = build_colors(ov)
             bump_data_epoch()      # 价格/颜色变化影响等价 API 与图表配色
+            audit('pricing_saved', count=len(ov),
+                  ip=self.client_address[0] if self.client_address else None)
             self._send(200, {'ok': True, 'count': len(ov)})
             return
         if u.path == '/api/settings':
@@ -1597,6 +1889,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             SETTINGS = st
             bump_data_epoch()      # 套餐设置随 meta 下发，需让聚合缓存失效
+            audit('settings_saved', settings=st,
+                  ip=self.client_address[0] if self.client_address else None)
             self._send(200, {'ok': True, 'settings': st})
             return
         self._send(404, {'error': 'not found'})
@@ -1615,6 +1909,7 @@ def flush_caches():
 def main():
     global INDEX, CREDITS, LOGS, ARCHIVE
     print(f'WorkBuddy Token 看板 v{VERSION} — 正在建立索引...')
+    ensure_data_schema()
     INDEX = UsageIndex()
     LOGS = LogIndex()
     ARCHIVE = Archive()
