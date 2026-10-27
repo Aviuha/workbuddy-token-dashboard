@@ -305,6 +305,9 @@
     background: rgba(52,211,153,.1); color: var(--green);
   }
   .tag.approx { background: rgba(147,161,181,.12); color: var(--text-3); }
+  .tag.seg { background: rgba(147,161,181,.12); color: var(--text-3); }
+  .tag.seg.peak { background: rgba(245,183,77,.12); color: var(--amber); }
+  .unit-note.bad { color: var(--amber); }
 
   footer { margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-3); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
 
@@ -1512,39 +1515,67 @@ function fmtApiPrice(v) {
 function renderUnitPrice(d) {
   const tb = $('tbody-unit');
   if (!tb) return;
-  const rows = (d.models || []).filter(m => m.calls && m.credits > 0 && (m.p + m.k + m.c) > 0);
-  if (!rows.length) {
+  const base = (d.models || []).filter(m => m.calls && m.credits > 0 && (m.p + m.k + m.c) > 0);
+  if (!base.length) {
     tb.__sig = null;
     tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-3);padding:22px">该时间段暂无积分消耗</td></tr>';
     $('unit-sub').textContent = '';
-    $('unit-note').textContent = '';
+    renderCreditFit(d);
     return;
   }
-  // 指纹含积分/成本/tokens 与官方价：任一项变化都要重绘
-  const sig = JSON.stringify(rows.map(m => [m.m, m.credits, m.cost, m.p, m.k, m.c,
-    m.price && [m.price.hit, m.price.miss, m.price.out]]));
-  if (tb.__sig === sig) return;
+  // 指纹含积分/成本/tokens/官方价/分段：任一项变化都要重绘
+  const sig = JSON.stringify([base.map(m => [m.m, m.credits, m.cost, m.paid_cost, m.p, m.k, m.c,
+    m.price && [m.price.hit, m.price.miss, m.price.out], m.segments]), CREDIT_CNY,
+    d.meta && d.meta.credit_fit]);
+  if (tb.__sig === sig) { renderCreditFit(d); return; }
   tb.__sig = sig;
 
   // 按总 tokens 降序，与「模型明细」默认顺序一致
-  const list = rows.slice().sort((a, b) => (b.p + b.k + b.c) - (a.p + a.k + a.c));
-  const split = list.filter(m => m.price && m.cost > 0).length;
-  tb.innerHTML = list.map(m => {
-    const mtokens = (m.p + m.k + m.c) / 1e6;
-    const blended = mtokens > 0 ? m.credits / mtokens : null;
+  const list = base.slice().sort((a, b) => (b.p + b.k + b.c) - (a.p + a.k + a.c));
+  // 有峰谷分档的模型拆成两条（闲时 / 高峰）：两档的官方价不同，积分单价也不同
+  const rows = [];
+  list.forEach(m => {
+    const segs = (m.segments || []).filter(s => (s.p + s.k + s.c) > 0 && s.paid_cost > 0);
+    if (segs.length >= 2) segs.forEach(s => rows.push({ m, s, seg: s }));
+    else rows.push({ m, s: m, seg: null });
+  });
+
+  const split = list.filter(m => m.price && paidCost(m) > 0).length;
+  tb.innerHTML = rows.map(({ m, s, seg }) => {
     const pr = m.price;
-    // 积分/¥ = 该模型实际消耗积分 ÷ 其「收费时段」等价 API 成本；再乘官方各档单价 → 每百万 tokens 所需积分
-    const pc = paidCost(m);
-    const beta = (pr && pc > 0) ? m.credits / pc : null;
+    const mtokens = (s.p + s.k + s.c) / 1e6;
+    const blended = mtokens > 0 ? s.credits / mtokens : null;
+    // 积分/¥ 用模型整体的「积分 ÷ 收费时段成本」：它已经把峰谷倍率吸收掉，
+    // 因此两段共用同一比例、各乘自己那档官方价——高峰行的三档正好是闲时的 peak_x 倍。
+    const wholePaid = paidCost(m);
+    const beta = (pr && wholePaid > 0 && m.credits > 0) ? m.credits / wholePaid : null;
+    const mult = seg ? (seg.mult || 1) : 1;
     const cell3 = v => (beta == null ? '<span class="unit-na">—</span>' : fmtCredUnit(v));
     const api = pr
-      ? `${fmtApiPrice(pr.miss)} / ${fmtApiPrice(pr.hit)} / ${fmtApiPrice(pr.out)}`
+      ? [pr.miss, pr.hit, pr.out].map(v => fmtApiPrice(v * mult)).join(' / ')
       : '<span class="unit-na">未定价</span>';
-    const freeTag = (pr && pr.free_hours) ? ' <span class="tag approx">夜间免费</span>' : '';
+    let tag = '';
+    if (seg) {
+      tag = seg.key === 'peak'
+        ? ' <span class="tag seg peak">高峰 ×' + mult + '</span>'
+        : ' <span class="tag seg off">闲时</span>';
+    } else if (pr && pr.free_hours) {
+      tag = ' <span class="tag approx">夜间免费</span>';
+    } else if (!pr) {
+      tag = ' <span class="tag approx">未定价</span>';
+    }
     let rowTitle;
     if (beta != null) {
-      rowTitle = `按该模型实测：每 1 元官方价约消耗 ${beta.toFixed(2)} 积分`;
-      if (pr.free_hours) rowTitle += `；夜间 ${String(pr.free_hours[0]).padStart(2, '0')}:00-${String(pr.free_hours[1]).padStart(2, '0')}:00 不计积分，单价按收费时段反推`;
+      rowTitle = '按该行实测：每 1 元官方价约消耗 ' + beta.toFixed(2) + ' 积分';
+      if (seg) {
+        rowTitle += seg.key === 'peak'
+          ? '；高峰时段官方价 ×' + mult + '，积分按含倍率的实际成本收取，故三档为闲时的 ' + mult + ' 倍'
+          : '；闲时按官方基价折算（高峰为它的 ' + (m.price && m.price.peak_x) + ' 倍）';
+      }
+      if (pr.free_hours) {
+        rowTitle += '；夜间 ' + pad2(pr.free_hours[0]) + ':00-' + pad2(pr.free_hours[1])
+          + ':00 不计积分，单价按收费时段反推';
+      }
     } else if (pr) {
       rowTitle = pr.free_hours
         ? '该范围内用量全在免费时段，没有可比的积分消耗'
@@ -1553,21 +1584,62 @@ function renderUnitPrice(d) {
       rowTitle = '官方未公布该模型价格，无法按三档拆分，只给综合平均';
     }
     return `
-    <tr title="${rowTitle.replace(/"/g, '&quot;')}">
-      <td><span class="m-dot" style="background:${modelColor(m.m)}"></span>${m.m}${pr ? freeTag : ' <span class="tag approx">未定价</span>'}</td>
-      <td class="num">${cell3(beta == null ? null : beta * pr.miss)}</td>
-      <td class="num">${cell3(beta == null ? null : beta * pr.hit)}</td>
-      <td class="num">${cell3(beta == null ? null : beta * pr.out)}</td>
+    <tr title="${escHtml(rowTitle)}">
+      <td><span class="m-dot" style="background:${modelColor(m.m)}"></span>${escHtml(m.m)}${tag}</td>
+      <td class="num">${cell3(beta == null ? null : beta * pr.miss * mult)}</td>
+      <td class="num">${cell3(beta == null ? null : beta * pr.hit * mult)}</td>
+      <td class="num">${cell3(beta == null ? null : beta * pr.out * mult)}</td>
       <td class="num">${fmtCredUnit(blended)}</td>
       <td class="num">${api}</td>
     </tr>`;
   }).join('');
 
-  $('unit-sub').textContent = `单位：积分 / 百万 tokens · ${list.length} 个模型（${split} 个可拆分三档）`;
-  $('unit-note').innerHTML =
-    '积分单价 = 该模型实际消耗积分 ÷ 其「收费时段」等价 API 成本 × 官方对应档单价；DeepSeek 按闲时基价折算，高峰时段的 ×2 已反映在实测比例里。' +
-    '<br>夜间免费（如 hy4-preview 23:00-08:00）的用量不计积分，因此从积分比对的分母中剔除，其 token 与等价 API 仍照常统计。' +
-    '<br>「综合」= 总积分 ÷ 总 tokens，受各模型缓存命中比例影响，与三档单价不可互推；官方未公布价格的模型只给综合值。';
+  const segModels = list.filter(m => (m.segments || []).length >= 2).length;
+  $('unit-sub').textContent = '单位：积分 / 百万 tokens · ' + list.length + ' 个模型（'
+    + split + ' 个可拆分三档' + (segModels ? '，' + segModels + ' 个按峰谷分两档' : '') + '）';
+  renderCreditFit(d);
+}
+
+/* --- 积分结构校验：实测三档比例与官方价比例是否一致（只作诊断，不参与上表计算） --- */
+function renderCreditFit(d) {
+  const el = $('unit-note');
+  if (!el) return;
+  const fit = (d.meta && d.meta.credit_fit) || null;
+  const all = (fit && fit.models) || {};
+  const keys = Object.keys(all);
+  if (!keys.length) {
+    el.textContent = '';
+    el.hidden = true;
+    el.title = '';
+    return;
+  }
+  el.hidden = false;
+  const bad = keys.filter(k => !all[k].ok);
+  const tolTxt = '阈值 ' + Math.round(fit.tol.hit * 100) + '% / ' + Math.round(fit.tol.out * 100) + '%';
+  const pct = v => (v >= 0 ? '+' : '') + (v * 100).toFixed(0) + '%';
+  // 悬停看完整的三档实测值与官方比例
+  el.title = keys.map(k => {
+    const v = all[k];
+    return k + '：' + v.n + ' 笔配对样本，R²=' + v.r2
+      + '；实测 未命中 ' + v.rates.miss + ' / 命中 ' + v.rates.hit + ' / 输出 ' + v.rates.out
+      + '（积分每百万 tokens）；比例 1 : ' + v.ratio[1] + ' : ' + v.ratio[2]
+      + '，官方 1 : ' + v.official_ratio[1] + ' : ' + v.official_ratio[2];
+  }).join('\n');
+  if (bad.length) {
+    el.className = 'unit-note bad';
+    el.innerHTML = '<b>⚠ 积分结构校验</b>：' + bad.map(k => {
+      const v = all[k];
+      return escHtml(k) + ' 实测偏离官方价（缓存命中 ' + pct(v.dev.hit) + '、输出 ' + pct(v.dev.out)
+        + '，' + tolTxt + '）';
+    }).join('；') + ' —— 积分规则或官方价可能已变。';
+  } else {
+    el.className = 'unit-note';
+    const worst = keys.reduce((a, k) => Math.max(a,
+      Math.abs(all[k].dev.hit), Math.abs(all[k].dev.out)), 0);
+    el.innerHTML = '积分结构校验通过：'
+      + keys.map(k => escHtml(k) + ' ' + all[k].n + ' 笔').join('、')
+      + ' 实测三档比例与官方价一致（最大偏差 ' + Math.round(worst * 100) + '%，' + tolTxt + '）。';
+  }
 }
 
 /* --- 最近请求 --- */
