@@ -88,7 +88,7 @@ STATIC_DIR = os.path.join(BASE, 'static')
 CACHE_FILE = os.path.join(BASE, 'data', 'index-cache.json')
 LOG_CACHE_FILE = os.path.join(BASE, 'data', 'log-index-cache.json')
 PORT = 8899
-VERSION = '1.2.1'
+VERSION = '1.2.2'
 
 LOCAL_TZ = datetime.now().astimezone().tzinfo
 CN_TZ = timezone(timedelta(hours=8))          # 北京时间，用于峰谷判定
@@ -308,6 +308,18 @@ def _git(*args, timeout=GIT_TIMEOUT):
     return True, p.stdout or '', (p.stderr or '').strip()
 
 
+def _git_net(*args, timeout=GIT_TIMEOUT, attempts=2, pause=3.0):
+    """网络型 git 操作（ls-remote / fetch）：失败重试一次，缓解代理瞬断"""
+    last = (False, '', '')
+    for i in range(attempts):
+        last = _git(*args, timeout=timeout)
+        if last[0]:
+            return last
+        if i + 1 < attempts:
+            time.sleep(pause)
+    return last
+
+
 def repo_state():
     """仓库基本情况：是否 git、origin 是否官方、HEAD、待提交改动"""
     ok, out, _ = _git('rev-parse', '--is-inside-work-tree')
@@ -351,7 +363,7 @@ def update_check():
     if not info['origin_ok']:
         out.update({'ok': False, 'error': 'origin 不是官方仓库：%s' % info['origin']})
         return out
-    ok, ls, err = _git('ls-remote', 'origin', 'refs/heads/' + UPDATE_BRANCH)
+    ok, ls, err = _git_net('ls-remote', 'origin', 'refs/heads/' + UPDATE_BRANCH)
     if not ok:
         out.update({'ok': False, 'error': '无法连接远端：%s' % (err or '未知错误')})
         return out
@@ -366,30 +378,43 @@ def update_check():
     out['remote_head'] = remote_sha
     out['up_to_date'] = (remote_sha == info['head'])
     out['ok'] = True
+    out['ahead'] = 0
     out['remote_version'] = VERSION if out['up_to_date'] else None
-    if not out['up_to_date']:
-        # 只为拿提交列表做一次 fetch（只动 .git，不改工作区）
-        ok2, _, err2 = _git('fetch', '--quiet', 'origin', UPDATE_BRANCH, timeout=30)
-        if ok2:
-            _, log, _ = _git('log', '--oneline', '--no-decorate',
-                             'HEAD..origin/' + UPDATE_BRANCH)
-            commits = []
-            for ln in (log or '').splitlines()[:20]:
-                sha, _, subject = ln.partition(' ')
-                commits.append({'sha': sha, 'subject': subject})
-            out['commits'] = commits
-            out['behind'] = len([ln for ln in (log or '').splitlines() if ln.strip()])
-            _, stat, _ = _git('diff', '--shortstat', 'HEAD..origin/' + UPDATE_BRANCH)
-            out['diffstat'] = (stat or '').strip()
-            # 远端版本号：从 origin/<branch> 的 server.py 里读，不额外发网络请求
-            _, remote_src, _ = _git('show', 'origin/%s:server.py' % UPDATE_BRANCH, timeout=15)
-            out['remote_version'] = version_from_source(remote_src)
-            if not out['remote_version']:
-                log_err('无法从远端 server.py 解析版本号')
-            _, files, _ = _git('diff', '--name-only', 'HEAD..origin/' + UPDATE_BRANCH)
-            out['files'] = [f for f in (files or '').splitlines() if f.strip()][:30]
-        else:
-            out['error'] = '已发现新版本，但获取提交列表失败：%s' % (err2 or '未知错误')
+    if out['up_to_date']:
+        return out
+    # SHA 不同时先 fetch，再判断究竟是「远端领先」「本地领先」还是「分叉」
+    ok2, _, err2 = _git_net('fetch', '--quiet', 'origin', UPDATE_BRANCH, timeout=30)
+    if not ok2:
+        out['error'] = '发现差异，但获取远端提交失败：%s' % (err2 or '未知错误')
+        return out
+    # rev-list --left-right --count HEAD...origin/main → "领先\t落后"
+    okc, counts, _ = _git('rev-list', '--left-right', '--count',
+                          'HEAD...origin/' + UPDATE_BRANCH, timeout=15)
+    ahead = behind = 0
+    if okc:
+        parts = (counts or '').split()
+        if len(parts) == 2:
+            try:
+                ahead, behind = int(parts[0]), int(parts[1])
+            except ValueError:
+                pass
+    out['ahead'], out['behind'] = ahead, behind
+    out['diverged'] = bool(ahead and behind)
+    _, remote_src, _ = _git('show', 'origin/%s:server.py' % UPDATE_BRANCH, timeout=15)
+    out['remote_version'] = version_from_source(remote_src)
+    if not out['remote_version']:
+        log_err('无法从远端 server.py 解析版本号')
+    if behind:
+        _, log, _ = _git('log', '--oneline', '--no-decorate', 'HEAD..origin/' + UPDATE_BRANCH)
+        commits = []
+        for ln in (log or '').splitlines()[:20]:
+            sha, _, subject = ln.partition(' ')
+            commits.append({'sha': sha, 'subject': subject})
+        out['commits'] = commits
+        _, stat, _ = _git('diff', '--shortstat', 'HEAD..origin/' + UPDATE_BRANCH)
+        out['diffstat'] = (stat or '').strip()
+        _, files, _ = _git('diff', '--name-only', 'HEAD..origin/' + UPDATE_BRANCH)
+        out['files'] = [f for f in (files or '').splitlines() if f.strip()][:30]
     return out
 
 
@@ -546,6 +571,55 @@ def sanitize_settings(data):
 
 
 SETTINGS = load_settings()
+
+
+# 启动后自动检查一次的结果缓存：页面加载时直接读取，不再等一次网络请求
+UPDATE_CACHE = {'result': None, 'checked_at': 0, 'running': False}
+
+
+def update_summary():
+    """给前端用的精简摘要；尚未检查过时 available 为 None"""
+    r = UPDATE_CACHE.get('result') or {}
+    if not r:
+        return {'available': None, 'checked_at': 0, 'is_git': None, 'local': VERSION,
+                'remote': None, 'behind': 0, 'ahead': 0, 'error': None}
+    behind = r.get('behind') or 0
+    ahead = r.get('ahead') or 0
+    return {
+        'available': (None if r.get('up_to_date') is None else (behind > 0)),
+        'local': r.get('version') or VERSION,
+        'remote': r.get('remote_version'),
+        'behind': behind,
+        'ahead': ahead,
+        'checked_at': r.get('checked_at') or UPDATE_CACHE.get('checked_at') or 0,
+        'is_git': r.get('is_git'),
+        'error': r.get('error'),
+    }
+
+
+def auto_update_check(delay=3.0):
+    """启动后延迟一小会儿在后台查一次（不阻塞启动、不占请求线程）"""
+    def _run():
+        try:
+            time.sleep(delay)
+            UPDATE_CACHE['running'] = True
+            res = update_check()
+            UPDATE_CACHE['result'] = res
+            UPDATE_CACHE['checked_at'] = int(time.time() * 1000)
+            if res.get('up_to_date') is False:
+                print('  更新检查: 有新版本 %s → %s（%s 个提交）'
+                      % (res.get('version'), res.get('remote_version') or '?', res.get('behind') or 0))
+            elif res.get('up_to_date') is True:
+                print('  更新检查: 已是最新（v%s）' % res.get('version'))
+            elif res.get('ok') is False:
+                print('  更新检查: %s' % (res.get('error') or res.get('reason') or '不可用'))
+        except Exception as e:
+            log_err('启动时更新检查失败: %r' % e)
+        finally:
+            UPDATE_CACHE['running'] = False
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t
 
 
 def is_peak_cn(ms):
@@ -1816,6 +1890,8 @@ class Handler(BaseHTTPRequestHandler):
                 if end <= start:
                     end = start + 60000
                 result = get_aggregate(INDEX, CREDITS, LOGS, ARCHIVE, start, end, unit, now)
+                if isinstance(result.get('meta'), dict):
+                    result['meta']['update'] = update_summary()   # 缓存结果里也要给最新的更新摘要
                 self._send(200, result)
             except Exception as e:
                 self._send(500, {'error': str(e)})
@@ -1825,6 +1901,7 @@ class Handler(BaseHTTPRequestHandler):
                 'version': VERSION,
                 'token': SESSION_TOKEN,
                 'data_schema': DATA_SCHEMA,
+                'update': update_summary(),
                 'traces_dir': TRACES_DIR,
                 'db': DB_PATH,
                 'files': len(INDEX.by_file),
@@ -1953,6 +2030,7 @@ def main():
           f' / 请求ID {n_bf_rid} 条，'
           f'累计 {ARCHIVE.synced_calls} 条调用 / {len(ARCHIVE.query_credits())} 条积分')
     print(f'  积分记录: {len(CREDITS.rows)} 条' + (f' (DB 错误: {CREDITS.err})' if CREDITS.err else ''))
+    auto_update_check(delay=3.0)      # 启动后后台查一次，页面加载即能读到结果
     t = threading.Thread(target=refresh_loop, daemon=True)
     t.start()
     srv = ThreadingHTTPServer(('127.0.0.1', PORT), Handler)

@@ -209,6 +209,9 @@
   .unit-na { color: var(--text-3); }
 
   /* ---------- 更新检查 ---------- */
+  #btn-update[data-state="new"] { color: var(--amber); border-color: rgba(245,183,77,.45); }
+  #btn-update[data-state="new"]::after { content: ''; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--amber); display: inline-block; margin-left: 6px; vertical-align: 1px; }
   .up-status { font-size: 12px; line-height: 1.8; }
   .up-badge { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 99px; margin-right: 8px; }
   .up-badge.ok { background: rgba(52,211,153,.12); color: var(--green); }
@@ -662,6 +665,7 @@ const state = {
   metric: 'total',
   lastData: null,
   token: null,          // 写操作令牌（服务端每次启动生成，随 meta 下发）
+  updateBusy: false,    // 手动检查进行中：期间不被自动摘要覆盖按钮文案
   timer: null,
   bgTimer: null,        // 页面不可见时的低频轮询计时器
   failCount: 0,
@@ -938,6 +942,7 @@ function bindExports() {
 function render(d) {
   state.lastData = d;
   if (d.meta && d.meta.token) state.token = d.meta.token;
+  if (d.meta && d.meta.update) applyUpdateSummary(d.meta.update);
   const k = d.kpi;
   // 同步「设置」里的积分套餐单价（服务端随 meta 下发）
   if (d.meta && d.meta.settings && d.meta.settings.credit_cny > 0 && d.meta.settings.credit_quota > 0) {
@@ -1671,21 +1676,30 @@ function setUpdateLabel(text, cls) {
   const btn = $('btn-update');
   if (btn) btn.dataset.state = cls || '';
 }
+function applyUpdateSummary(u) {
+  // 启动时后端已自动查过一次：有更新显示「有更新」，否则保持「检查更新」
+  if (!u || state.updateBusy) return;
+  if (u.available === true) setUpdateLabel('有更新', 'new');
+  else setUpdateLabel('检查更新', '');
+}
 async function checkUpdate() {
   const body = $('up-body');
   const msg = $('up-msg');
   if (msg) msg.textContent = '';
   body.innerHTML = '<span class="up-badge ok">检查中</span>正在读取远端提交…';
+  state.updateBusy = true;
   setUpdateLabel('检查中…', 'busy');
   let d;
   try {
     const res = await fetch('/api/update/check', { cache: 'no-store' });
     d = await res.json();
   } catch (e) {
+    state.updateBusy = false;
     body.innerHTML = '<span class="up-badge err">失败</span>无法访问本地服务。';
     setUpdateLabel('检查更新', 'err');
     return;
   }
+  state.updateBusy = false;
   renderUpdate(d);
 }
 function renderUpdate(d) {
@@ -1713,7 +1727,15 @@ function renderUpdate(d) {
     + agoText(d.checked_at) + '</div>';
   if (d.up_to_date) {
     body.innerHTML = '<span class="up-badge ok">已是最新</span>没有需要更新的提交。' + head;
-    setUpdateLabel('已是最新', 'ok');
+    setUpdateLabel('检查更新', '');
+    return;
+  }
+  if (!d.behind && d.ahead) {
+    // 本地有未推送提交：远端没有新内容，不提示更新
+    body.innerHTML = '<span class="up-badge ok">本地领先</span>本地有 ' + d.ahead
+      + ' 个未推送的提交，远端没有新内容。' + head
+      + '<div class="up-meta">推送用 git push；这里不提示更新，避免把「本地领先」误判成「有新版本」。</div>';
+    setUpdateLabel('检查更新', '');
     return;
   }
   const commits = (d.commits || []).map(c =>
@@ -1727,7 +1749,12 @@ function renderUpdate(d) {
     + '<div class="up-list">' + commits + '</div>' + files
     + '<div class="up-cmd">' + esc(d.hint_cmd || ('cd "' + (d.repo_path || '') + '" && git pull && ./start.sh restart')) + '</div>'
     + '<div class="up-meta">当前版本为只读检查，不会自动安装。执行上面两条命令即可完成更新（Windows 用 start.bat restart）。</div>';
-  setUpdateLabel(rv && rv !== d.version ? ('v' + rv) : '有新版本', 'new');
+  setUpdateLabel('有更新', 'new');
+  if (d.diverged) {
+    body.insertAdjacentHTML('beforeend',
+      '<div class="up-meta" style="color:var(--amber)">本地还有 ' + (d.ahead || 0)
+      + ' 个未推送的提交：本地与远端已分叉，直接 git pull 会产生合并提交。</div>');
+  }
   if (rv && rv === d.version) {
     body.insertAdjacentHTML('beforeend',
       '<div class="up-meta" style="color:var(--amber)">远端提交已更新，但版本号仍是 v' + esc(d.version)
