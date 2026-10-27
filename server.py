@@ -427,6 +427,13 @@ def _extract_generation_rec(sp):
         idt = rid_time_of(rid)
         if idt is None or abs(t - idt) > RID_TIME_TOLERANCE:
             rid = None
+    # 新式 trace 的 toolInput 常缺 requestId，此时用响应 id 兜底：
+    # 响应 id 内嵌前 12 位毫秒时间戳，实测与 span 起始时间一致（差 0 秒），
+    # 且与日志侧的 message_id 完全对应，可用于把积分记录与调用对上。
+    if rid is None and resp_id:
+        idt = rid_time_of(resp_id)
+        if idt is not None and abs(t - idt) <= RID_TIME_TOLERANCE:
+            rid = resp_id
     return {
         't': t, 'm': model or 'unknown', 'p': p, 'c': c, 'k': k, 'r': r, 'q': rid,
         'i': resp_id, 'd': int(sp.get('duration') or 0) or None,
@@ -509,7 +516,7 @@ class UsageIndex:
         try:
             with open(CACHE_FILE, 'r', encoding='utf-8') as fh:
                 data = json.load(fh)
-            if data.get('v') != 3:
+            if data.get('v') != 4:
                 self.by_file = {}
                 return
             self.by_file = data.get('files', {})
@@ -521,7 +528,7 @@ class UsageIndex:
             os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
             tmp = CACHE_FILE + '.tmp'
             with open(tmp, 'w', encoding='utf-8') as fh:
-                json.dump({'v': 3, 'files': self.by_file, 'saved': int(time.time() * 1000)}, fh)
+                json.dump({'v': 4, 'files': self.by_file, 'saved': int(time.time() * 1000)}, fh)
             os.replace(tmp, CACHE_FILE)
             self._last_save = time.time()
             return True
@@ -850,6 +857,21 @@ class Archive:
         with self.lock:
             cur = self.con.executemany(
                 'UPDATE calls SET rt = ? WHERE uid = ? AND rt IS NULL', rows)
+            self.con.commit()
+        return cur.rowcount or 0
+
+    def backfill_rids(self, trace_recs):
+        """一次性迁移：为已归档但缺 requestId 的 trace 记录回填 rid（幂等）
+        老版本解析器只从 toolInput 取 requestId，新式 trace 里该字段缺失，
+        导致请求与积分记录无法按 rid 对上；响应 id 内嵌的时间戳与 span 起始时间一致，
+        解析器现在把它作为兜底来源，这里把历史行补齐。"""
+        rows = [(r['q'], 't:' + r['i']) for r in trace_recs
+                if r.get('i') and r.get('q')]
+        if not rows:
+            return 0
+        with self.lock:
+            cur = self.con.executemany(
+                'UPDATE calls SET rid = ? WHERE uid = ? AND rid IS NULL', rows)
             self.con.commit()
         return cur.rowcount or 0
 
@@ -1600,11 +1622,13 @@ def main():
     n_bf = ARCHIVE.backfill_durations(INDEX.records, LOGS.records)   # 历史记录回填耗时（一次性迁移）
     n_bf_sid = ARCHIVE.backfill_sids(LOGS.records)     # 历史记录回填会话（一次性迁移）
     n_bf_rt = ARCHIVE.backfill_rts(LOGS.records)       # 历史记录回填请求类型（一次性迁移）
+    n_bf_rid = ARCHIVE.backfill_rids(INDEX.records)     # 历史 trace 记录回填 requestId（一次性迁移）
     CREDITS = CreditStore()
     ARCHIVE.sync_credits(CREDITS.rows)
     print(f'  索引完成: {len(INDEX.by_file)} 个 trace 文件, {len(INDEX.records)} 条调用记录')
     print(f'  日志索引: {len(LOGS.by_file)} 个日志文件, {len(LOGS.records)} 条上报记录')
-    print(f'  归档: 本次新入库 {n_new} 条，回填耗时 {n_bf} 条 / 会话 {n_bf_sid} 条 / 类型 {n_bf_rt} 条，'
+    print(f'  归档: 本次新入库 {n_new} 条，回填耗时 {n_bf} 条 / 会话 {n_bf_sid} 条 / 类型 {n_bf_rt} 条'
+          f' / 请求ID {n_bf_rid} 条，'
           f'累计 {ARCHIVE.synced_calls} 条调用 / {len(ARCHIVE.query_credits())} 条积分')
     print(f'  积分记录: {len(CREDITS.rows)} 条' + (f' (DB 错误: {CREDITS.err})' if CREDITS.err else ''))
     t = threading.Thread(target=refresh_loop, daemon=True)
