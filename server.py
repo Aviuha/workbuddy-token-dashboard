@@ -17,6 +17,7 @@ WorkBuddy Token 用量看板 — 本地实时服务（仅用 Python 标准库）
 import atexit
 import bisect
 import json
+import math
 import os
 import re
 import secrets
@@ -88,7 +89,7 @@ STATIC_DIR = os.path.join(BASE, 'static')
 CACHE_FILE = os.path.join(BASE, 'data', 'index-cache.json')
 LOG_CACHE_FILE = os.path.join(BASE, 'data', 'log-index-cache.json')
 PORT = 8899
-VERSION = '1.2.2'
+VERSION = '1.2.3'
 
 LOCAL_TZ = datetime.now().astimezone().tzinfo
 CN_TZ = timezone(timedelta(hours=8))          # 北京时间，用于峰谷判定
@@ -1444,6 +1445,9 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
     kpi = {'total': 0, 'prompt': 0, 'cached': 0, 'fresh': 0, 'completion': 0,
            'reasoning': 0, 'calls': 0, 'credits': 0.0, 'credit_reqs': 0, 'cost': 0.0}
     models = {}
+    # 峰谷模型：每个请求在各段的付费成本。积分按成本成正比分摊到两段——
+    # 按 token 比例分摊是错的（高峰的 token 成本是闲时的 peak_x 倍，会把高峰积分低估一半）。
+    rid_seg = {}
     trend = {}
     type_trend = {'p': [0] * n_buckets, 'k': [0] * n_buckets, 'c': [0] * n_buckets}
     for r in recs:
@@ -1461,8 +1465,9 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
         # 官方 API 等价价格（人民币），DeepSeek 按调用发生时间判定峰谷
         price = PRICING.get(r['m'])
         cost = 0.0
+        is_peak = bool(price and price['peak_x'] > 1 and is_peak_cn(r['t']))
         if price:
-            mult = price['peak_x'] if (price['peak_x'] > 1 and is_peak_cn(r['t'])) else 1.0
+            mult = price['peak_x'] if is_peak else 1.0
             cost = (r['k'] * price['hit'] + fresh * price['miss'] + r['c'] * price['out']) * mult / 1e6
             kpi['cost'] += cost
         # 免费时段（如 hy4 夜间免费）的用量不计积分，做积分比对时要从分母里去掉
@@ -1472,7 +1477,7 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
         m = models.setdefault(r['m'], {'m': r['m'], 'calls': 0, 'p': 0, 'k': 0, 'c': 0,
                                        'reason': 0, 'credits': 0.0, 'credit_reqs': 0,
                                        'cost': 0.0, 'paid_cost': 0.0, 'first': r['t'], 'last': r['t'],
-                                       'out_dur': 0, 'out_tok': 0})
+                                       'out_dur': 0, 'out_tok': 0, 'segs': {}})
         m['calls'] += 1
         m['p'] += r['p']
         m['k'] += r['k']
@@ -1480,6 +1485,20 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
         m['reason'] += r['r']
         m['cost'] += cost
         m['paid_cost'] += paid_cost
+        if price and price['peak_x'] > 1:      # 峰谷模型按段累计，供「积分单价」分两条展示
+            sg = m['segs'].setdefault('peak' if is_peak else 'off',
+                                      {'calls': 0, 'p': 0, 'k': 0, 'c': 0,
+                                       'cost': 0.0, 'paid': 0.0, 'credits': 0.0})
+            sg['calls'] += 1
+            sg['p'] += r['p']
+            sg['k'] += r['k']
+            sg['c'] += r['c']
+            sg['cost'] += cost
+            sg['paid'] += paid_cost
+            q = r.get('q')
+            if q:
+                ra = rid_seg.setdefault(q, [0.0, 0.0])
+                ra[1 if is_peak else 0] += paid_cost
         if r.get('d'):      # 生成速度：仅统计有耗时记录的调用（输出 tokens ÷ 生成时长）
             m['out_dur'] += r['d']
             m['out_tok'] += r['c']
@@ -1515,6 +1534,18 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
         if m in models:
             models[m]['credits'] += c['cr']
             models[m]['credit_reqs'] += 1
+            segs = models[m].get('segs')
+            if segs:
+                a = rid_seg.get(c.get('rid') or '')
+                if a and (a[0] + a[1]) > 0:
+                    share = a[1] / (a[0] + a[1])
+                else:                  # 定位不到请求：按该模型整体的段付费成本比拆分
+                    tot_paid = sum(s['paid'] for s in segs.values())
+                    share = (segs['peak']['paid'] / tot_paid) if (tot_paid and 'peak' in segs) else 0.0
+                if 'peak' in segs:
+                    segs['peak']['credits'] += c['cr'] * share
+                if 'off' in segs:
+                    segs['off']['credits'] += c['cr'] * (1.0 - share)
         bi = bisect.bisect_right(starts, t) - 1
         if 0 <= bi < n_buckets:
             cd = credit_trend.setdefault(m, [0.0] * n_buckets)
@@ -1695,6 +1726,7 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
                                'log_records': len(log_index.records) if log_index else 0},
             'credit_precision': {'id': n_id, 'session': len(credit_rows) - n_id,
                                  'credits_all': round(credits_total_all, 2)},
+            'credit_fit': credit_fit_summary(),
             'settings': SETTINGS,
         },
         'kpi': {
@@ -1712,6 +1744,14 @@ def aggregate(index, credit_store, log_index, archive, start_ms, end_ms, unit, n
             'cost': round(m['cost'], 4) if m['m'] in PRICING else None,
             'paid_cost': round(m['paid_cost'], 4) if m['m'] in PRICING else None,
             'price': PRICING.get(m['m']),
+            'segments': ([{'key': k, 'label': ('闲时' if k == 'off' else '高峰'),
+                           'mult': (1.0 if k == 'off' else PRICING[m['m']]['peak_x']),
+                           'calls': s['calls'], 'p': s['p'] - s['k'], 'k': s['k'], 'c': s['c'],
+                           'total': s['p'] + s['c'], 'cost': round(s['cost'], 4),
+                           'paid_cost': round(s['paid'], 4),
+                           'credits': round(s['credits'], 4)}
+                          for k, s in sorted(m.get('segs', {}).items(), key=lambda kv: kv[0] != 'off')]
+                         if m.get('segs') else None),
             'color': MODEL_COLOR_OVERRIDES.get(m['m']),
             'speed': round(m.get('out_tok', 0) / (m.get('out_dur', 0) / 1000.0), 1) if m.get('out_dur') else None,
             'first': m['first'], 'last': m['last'],
@@ -1748,6 +1788,177 @@ def get_aggregate(index, credit_store, log_index, archive, start_ms, end_ms, uni
         while len(AGG_CACHE) > AGG_CACHE_MAX:
             AGG_CACHE.popitem(last=False)
         return result
+
+
+# ================= 积分结构校验（诊断用，不参与主口径） =================
+# 主口径仍是「β × 官方档单价」（β = 该模型积分 ÷ 收费时段等价 API 成本）。
+# 这里额外做独立检验：把每笔积分与它那次请求的三类 token 对齐，解
+#   cr = a·未命中 + b·缓存命中 + d·输出
+# 若解出的比例偏离官方价比例超阈值，说明积分规则或官方价可能已变。
+# 结论只用于提示，不替换上面的数字。
+CREDIT_FIT = {'result': {}, 'at': 0}
+FIT_MIN_SAMPLES = 30          # 少于该样本量不做检验（三参数需要足够自由度）
+FIT_TOL_HIT = 0.30            # 缓存命中档比例偏差阈值
+FIT_TOL_OUT = 0.40            # 输出档比例偏差阈值（输出 token 占比低，天然更不准）
+FIT_INTERVAL = 600            # 后台重算间隔（秒）
+
+
+def _solve_small(a, b):
+    """高斯消元（部分主元）；奇异返回 None"""
+    n = len(a)
+    m = [a[i][:] + [b[i]] for i in range(n)]
+    for i in range(n):
+        p = max(range(i, n), key=lambda r: abs(m[r][i]))
+        if abs(m[p][i]) < 1e-15:
+            return None
+        m[i], m[p] = m[p], m[i]
+        for r in range(i + 1, n):
+            f = m[r][i] / m[i][i]
+            for c in range(i, n + 1):
+                m[r][c] -= f * m[i][c]
+    x = [0.0] * n
+    for i in range(n - 1, -1, -1):
+        x[i] = (m[i][n] - sum(m[i][c] * x[c] for c in range(i + 1, n))) / m[i][i]
+    return x
+
+
+def _fit_three(samples):
+    """最小二乘解三档单价。三列量级可差 200 倍，必须先列归一化再解，
+    否则会解出负系数（实测过：未命中 -0.53、输出 1485）。"""
+    n = len(samples)
+    cols = [[s[i] for s in samples] for i in range(3)]
+    nrm = [math.sqrt(sum(v * v for v in c)) or 1e-12 for c in cols]
+    a = [[sum((cols[i][k] / nrm[i]) * (cols[j][k] / nrm[j]) for k in range(n)) for j in range(3)]
+         for i in range(3)]
+    b = [sum((cols[i][k] / nrm[i]) * samples[k][3] for k in range(n)) for i in range(3)]
+    z = _solve_small(a, b)
+    if not z:
+        return None
+    co = [z[i] / nrm[i] for i in range(3)]
+    ys = [s[3] for s in samples]
+    yb = sum(ys) / n
+    ss_res = sum((y - sum(co[i] * s[i] for i in range(3))) ** 2 for s, y in zip(samples, ys))
+    ss_tot = sum((y - yb) ** 2 for y in ys)
+    return co, (1 - ss_res / ss_tot if ss_tot else 0.0)
+
+
+def fit_credit_rates(recs, credit_rows, min_samples=FIT_MIN_SAMPLES):
+    """请求级三参数最小二乘（诊断）。只取「该请求全部调用都能拿到缓存真值」的样本。
+
+    日志行本身没有缓存字段，需要在 trace 池里按「同模型 + 同 token 总量 + 时间邻近」
+    配对（与聚合去重的双胞胎逻辑同源）。配对按请求独立进行，避免请求之间互相抢占。"""
+    trace_pool = {}
+    by_rid = {}
+    for r in recs:
+        if r.get('src') == 'log':
+            q = r.get('q')
+            if q:
+                by_rid.setdefault(q, []).append(r)
+            continue
+        trace_pool.setdefault((r['m'], r['p'] + r['c']), []).append((r['t'], r['k'], r['p'], r['c']))
+    for v in trace_pool.values():
+        v.sort()
+
+    samples = {}
+    skipped = 0
+    for c in credit_rows:
+        rid = c.get('rid')
+        calls = by_rid.get(rid) if rid else None
+        if not calls:
+            skipped += 1
+            continue
+        price = PRICING.get(calls[0]['m'])
+        if not price:
+            skipped += 1
+            continue
+        used = set()                 # 本请求内部已配对的 trace 调用（必须带 key，否则不同 key 的同索引会互相屏蔽）
+        x1 = x2 = x3 = 0.0
+        ok = True
+        for r in calls:
+            key = (r['m'], r['p'] + r['c'])
+            cand = trace_pool.get(key) or ()
+            best, best_dt = None, None
+            for idx, it in enumerate(cand):
+                if (key, idx) in used:
+                    continue
+                dt = abs(it[0] - r['t'])
+                if dt <= TWIN_TS_TOLERANCE and (best_dt is None or dt < best_dt):
+                    best, best_dt = idx, dt
+            if best is None:
+                ok = False
+                break
+            used.add((key, best))
+            _, kk, pp, cc = cand[best]
+            mult = price['peak_x'] if (price['peak_x'] > 1 and is_peak_cn(r['t'])) else 1.0
+            x1 += (pp - kk) * mult / 1e6
+            x2 += kk * mult / 1e6
+            x3 += cc * mult / 1e6
+        if not ok or (x1 + x2 + x3) <= 0:
+            skipped += 1
+            continue
+        samples.setdefault(calls[0]['m'], []).append((x1, x2, x3, c['cr']))
+
+    out = {}
+    for model, sm in samples.items():
+        if len(sm) < min_samples:
+            continue
+        res = _fit_three(sm)
+        if not res:
+            continue
+        co, r2 = res
+        if co[0] <= 0 or co[1] < 0 or co[2] <= 0:
+            continue                     # 解出负系数说明共线性太重，不做结论
+        price = PRICING.get(model) or {}
+        o_hit = (price.get('hit', 0) / price['miss']) if price.get('miss') else 0.0
+        o_out = (price.get('out', 0) / price['miss']) if price.get('miss') else 0.0
+        r_hit, r_out = co[1] / co[0], co[2] / co[0]
+        dev_hit = (r_hit / o_hit - 1.0) if o_hit else 0.0
+        dev_out = (r_out / o_out - 1.0) if o_out else 0.0
+        out[model] = {
+            'n': len(sm), 'r2': round(r2, 4),
+            'rates': {'miss': round(co[0], 2), 'hit': round(co[1], 3), 'out': round(co[2], 2)},
+            'ratio': [1.0, round(r_hit, 4), round(r_out, 4)],
+            'official_ratio': [1.0, round(o_hit, 4), round(o_out, 4)],
+            'dev': {'hit': round(dev_hit, 4), 'out': round(dev_out, 4)},
+            'ok': abs(dev_hit) <= FIT_TOL_HIT and abs(dev_out) <= FIT_TOL_OUT,
+        }
+    return {'models': out, 'skipped': skipped}
+
+
+def credit_fit_summary():
+    """给前端用的精简摘要；尚未算过时 models 为空"""
+    res = CREDIT_FIT.get('result') or {}
+    models = res.get('models') or {}
+    return {
+        'at': CREDIT_FIT.get('at') or 0,
+        'models': models,
+        'bad': [m for m, v in models.items() if not v.get('ok')],
+        'tol': {'hit': FIT_TOL_HIT, 'out': FIT_TOL_OUT},
+        'min_samples': FIT_MIN_SAMPLES,
+    }
+
+
+def credit_fit_loop(interval=FIT_INTERVAL, delay=12.0):
+    """后台低频重算：不占请求线程，失败不影响主流程"""
+    def _run():
+        time.sleep(delay)
+        while True:
+            try:
+                if ARCHIVE is not None:
+                    now = int(time.time() * 1000)
+                    recs = [r for r in ARCHIVE.query_calls(0, now + 86400000)
+                            if r['m'] not in EXCLUDED_MODELS]
+                    CREDIT_FIT['result'] = fit_credit_rates(recs, ARCHIVE.query_credits())
+                    CREDIT_FIT['at'] = now
+                    bad = [m for m, v in (CREDIT_FIT['result']['models'] or {}).items() if not v['ok']]
+                    if bad:
+                        print('  积分结构校验: 偏离官方价比例超阈值 -> %s' % ', '.join(bad))
+            except Exception as e:
+                log_err('积分结构校验失败: %r' % e)
+            time.sleep(interval)
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t
 
 
 INDEX = None
@@ -1892,6 +2103,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = get_aggregate(INDEX, CREDITS, LOGS, ARCHIVE, start, end, unit, now)
                 if isinstance(result.get('meta'), dict):
                     result['meta']['update'] = update_summary()   # 缓存结果里也要给最新的更新摘要
+                    result['meta']['credit_fit'] = credit_fit_summary()
                 self._send(200, result)
             except Exception as e:
                 self._send(500, {'error': str(e)})
@@ -2031,6 +2243,7 @@ def main():
           f'累计 {ARCHIVE.synced_calls} 条调用 / {len(ARCHIVE.query_credits())} 条积分')
     print(f'  积分记录: {len(CREDITS.rows)} 条' + (f' (DB 错误: {CREDITS.err})' if CREDITS.err else ''))
     auto_update_check(delay=3.0)      # 启动后后台查一次，页面加载即能读到结果
+    credit_fit_loop()                 # 积分结构校验：低频后台运行，只作诊断
     t = threading.Thread(target=refresh_loop, daemon=True)
     t.start()
     srv = ThreadingHTTPServer(('127.0.0.1', PORT), Handler)
