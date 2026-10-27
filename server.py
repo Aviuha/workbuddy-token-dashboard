@@ -88,7 +88,7 @@ STATIC_DIR = os.path.join(BASE, 'static')
 CACHE_FILE = os.path.join(BASE, 'data', 'index-cache.json')
 LOG_CACHE_FILE = os.path.join(BASE, 'data', 'log-index-cache.json')
 PORT = 8899
-VERSION = '1.2.0'
+VERSION = '1.2.1'
 
 LOCAL_TZ = datetime.now().astimezone().tzinfo
 CN_TZ = timezone(timedelta(hours=8))          # 北京时间，用于峰谷判定
@@ -325,6 +325,17 @@ def repo_state():
     }
 
 
+VERSION_RE = re.compile(r"^VERSION\s*=\s*'([0-9][0-9A-Za-z.\-]*)'", re.M)
+
+
+def version_from_source(text):
+    """从 server.py 源码文本里取 VERSION（用于读远端版本号）；取不到返回 None"""
+    if not text:
+        return None
+    m = VERSION_RE.search(text)
+    return m.group(1) if m else None
+
+
 def update_check():
     """只读检查：不 fetch、不改工作区。远端 SHA 用 ls-remote 取得（不占 GitHub API 配额）"""
     info = repo_state()
@@ -355,6 +366,7 @@ def update_check():
     out['remote_head'] = remote_sha
     out['up_to_date'] = (remote_sha == info['head'])
     out['ok'] = True
+    out['remote_version'] = VERSION if out['up_to_date'] else None
     if not out['up_to_date']:
         # 只为拿提交列表做一次 fetch（只动 .git，不改工作区）
         ok2, _, err2 = _git('fetch', '--quiet', 'origin', UPDATE_BRANCH, timeout=30)
@@ -369,6 +381,11 @@ def update_check():
             out['behind'] = len([ln for ln in (log or '').splitlines() if ln.strip()])
             _, stat, _ = _git('diff', '--shortstat', 'HEAD..origin/' + UPDATE_BRANCH)
             out['diffstat'] = (stat or '').strip()
+            # 远端版本号：从 origin/<branch> 的 server.py 里读，不额外发网络请求
+            _, remote_src, _ = _git('show', 'origin/%s:server.py' % UPDATE_BRANCH, timeout=15)
+            out['remote_version'] = version_from_source(remote_src)
+            if not out['remote_version']:
+                log_err('无法从远端 server.py 解析版本号')
             _, files, _ = _git('diff', '--name-only', 'HEAD..origin/' + UPDATE_BRANCH)
             out['files'] = [f for f in (files or '').splitlines() if f.strip()][:30]
         else:

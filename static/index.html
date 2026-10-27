@@ -1703,8 +1703,13 @@ function renderUpdate(d) {
     setUpdateLabel('检查更新', 'err');
     return;
   }
-  const head = '<div class="up-meta">当前 v' + esc(d.version) + ' · <code>' + esc(shortSha(d.head))
-    + '</code> · 远端 <code>' + esc(shortSha(d.remote_head)) + '</code>（' + esc(d.branch) + '）· 检查于 '
+  const rv = d.remote_version;
+  const verTxt = rv && rv !== d.version
+    ? 'v' + esc(d.version) + ' <span style="color:var(--text-3)">→</span> <b style="color:var(--amber)">v' + esc(rv) + '</b>'
+    : 'v' + esc(d.version) + (rv ? '' : '（远端版本号未知）');
+  const head = '<div class="up-meta">版本 ' + verTxt
+    + ' · 本地 <code>' + esc(shortSha(d.head)) + '</code>'
+    + ' · 远端 <code>' + esc(shortSha(d.remote_head)) + '</code>（' + esc(d.branch) + '）· 检查于 '
     + agoText(d.checked_at) + '</div>';
   if (d.up_to_date) {
     body.innerHTML = '<span class="up-badge ok">已是最新</span>没有需要更新的提交。' + head;
@@ -1722,7 +1727,12 @@ function renderUpdate(d) {
     + '<div class="up-list">' + commits + '</div>' + files
     + '<div class="up-cmd">' + esc(d.hint_cmd || ('cd "' + (d.repo_path || '') + '" && git pull && ./start.sh restart')) + '</div>'
     + '<div class="up-meta">当前版本为只读检查，不会自动安装。执行上面两条命令即可完成更新（Windows 用 start.bat restart）。</div>';
-  setUpdateLabel('有新版本', 'new');
+  setUpdateLabel(rv && rv !== d.version ? ('v' + rv) : '有新版本', 'new');
+  if (rv && rv === d.version) {
+    body.insertAdjacentHTML('beforeend',
+      '<div class="up-meta" style="color:var(--amber)">远端提交已更新，但版本号仍是 v' + esc(d.version)
+      + ' —— 按项目约定每次改动应把最后一位 +1。</div>');
+  }
   if (d.dirty && d.dirty.length) {
     body.insertAdjacentHTML('beforeend',
       '<div class="up-meta" style="color:var(--amber)">注意：工作区有 ' + d.dirty.length
