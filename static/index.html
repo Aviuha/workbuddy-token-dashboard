@@ -1720,7 +1720,7 @@ function renderUpdate(d) {
     '<span class="up-badge new">有新版本</span>落后 ' + (d.behind || (d.commits || []).length) + ' 个提交。'
     + head + stat
     + '<div class="up-list">' + commits + '</div>' + files
-    + '<div class="up-cmd">cd ' + esc(d.repo_path || '<项目目录>') + ' &amp;&amp; git pull &amp;&amp; ./start.sh restart</div>'
+    + '<div class="up-cmd">' + esc(d.hint_cmd || ('cd "' + (d.repo_path || '') + '" && git pull && ./start.sh restart')) + '</div>'
     + '<div class="up-meta">当前版本为只读检查，不会自动安装。执行上面两条命令即可完成更新（Windows 用 start.bat restart）。</div>';
   setUpdateLabel('有新版本', 'new');
   if (d.dirty && d.dirty.length) {

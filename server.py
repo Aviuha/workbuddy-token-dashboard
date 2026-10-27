@@ -20,6 +20,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import signal
 import socket
 import sqlite3
@@ -225,6 +226,15 @@ UPDATE_REMOTE = 'https://github.com/Aviuha/workbuddy-token-dashboard.git'
 UPDATE_BRANCH = 'main'
 GIT_TIMEOUT = 20
 
+def update_hint_cmd(path=None):
+    """给用户复制的更新命令：按实际安装路径与平台生成。
+    路径一律加引号 —— 含空格、括号、中文的目录直接粘贴也能执行。"""
+    p = path if path is not None else BASE
+    if os.name == 'nt':
+        return 'cd /d "%s" && git pull && start.bat restart' % p
+    return 'cd %s && git pull && ./start.sh restart' % shlex.quote(p)
+
+
 # 数据格式标记：写入 data/schema.json。更新代码时据此判断 data/ 是否由更高版本写过，
 # 避免「用旧代码去读新结构」导致看板异常。data/ 里的归档库与缓存永不删除。
 DATA_SCHEMA = 1
@@ -319,7 +329,7 @@ def update_check():
     """只读检查：不 fetch、不改工作区。远端 SHA 用 ls-remote 取得（不占 GitHub API 配额）"""
     info = repo_state()
     out = {'version': VERSION, 'branch': UPDATE_BRANCH, 'remote': UPDATE_REMOTE,
-           'repo_path': BASE,
+           'repo_path': BASE, 'hint_cmd': update_hint_cmd(),
            'checked_at': int(time.time() * 1000), 'is_git': info.get('is_git', False)}
     if not out['is_git']:
         out.update({'ok': False, 'reason': '当前目录不是 git 仓库，无法在线更新（请用 git clone 安装）'})
