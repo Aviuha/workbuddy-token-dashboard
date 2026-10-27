@@ -205,6 +205,8 @@
   }
   .u { font-size: 10px; color: var(--text-3); margin-left: 3px; }
   .cr-cny { font-size: 10px; color: var(--text-3); white-space: nowrap; }
+  .unit-note { font-size: 11px; color: var(--text-3); padding: 10px 10px 2px; line-height: 1.7; }
+  .unit-na { color: var(--text-3); }
 
   /* ---------- 价格调整弹窗 ---------- */
   .modal-mask {
@@ -455,6 +457,28 @@
           <tbody id="tbody-models"></tbody>
         </table>
       </div>
+    </div>
+    <div class="card span2" id="card-unit">
+      <div class="card-head">
+        <h2>积分单价</h2>
+        <span class="sub" id="unit-sub">单位：积分 / 百万 tokens</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>模型</th>
+              <th class="num" title="输入·缓存未命中：每百万 tokens 所需积分">输入·未命中</th>
+              <th class="num" title="输入·缓存命中：每百万 tokens 所需积分">缓存命中</th>
+              <th class="num" title="输出：每百万 tokens 所需积分">输出</th>
+              <th class="num" title="该模型实际平均：总积分 ÷ 总 tokens（受其缓存命中比例影响）">综合</th>
+              <th class="num" title="各厂商官方定价：未命中输入 / 缓存命中输入 / 输出，人民币每百万 tokens">官方 API ¥</th>
+            </tr>
+          </thead>
+          <tbody id="tbody-unit"></tbody>
+        </table>
+      </div>
+      <div class="unit-note" id="unit-note"></div>
     </div>
     <div class="card span2">
       <div class="card-head"><h2>最近请求</h2><span class="sub">按完成时间 · 含积分</span></div>
@@ -932,6 +956,7 @@ function render(d) {
   renderRate(d);
   renderCredit(d);
   renderTable(d);
+  renderUnitPrice(d);
   renderRequests(d);
   renderTasks(d);
   const from = d.meta.data_from ? fmtDT(d.meta.data_from) : '—';
@@ -1431,6 +1456,70 @@ function renderTable(d) {
       <td class="num" style="color:${m.cost != null ? 'var(--green)' : 'var(--text-3)'};cursor:${m.cost != null ? 'help' : 'default'}" title="${hint.replace(/"/g, '&quot;')}">${fmtCNY(m.cost)}</td>
       <td class="num">${disc == null ? dash : `<span class="disc-pill" title="折扣 = 积分价值 ÷ 等价 API">≈${(disc * 10).toFixed(1)} 折</span>`}</td>
     </tr>`; }).join('');
+}
+
+/* --- 积分单价：各模型每百万 tokens 需要多少积分（由实测用量反推） --- */
+function fmtCredUnit(v) {
+  if (v == null || !isFinite(v)) return '—';
+  if (v >= 1000) return Math.round(v).toLocaleString('en-US');
+  if (v >= 10) return v.toFixed(1);
+  return v.toFixed(2);
+}
+function fmtApiPrice(v) {
+  if (v == null) return '—';
+  if (v >= 10) return '¥' + (+v.toFixed(2));
+  return '¥' + (+v.toFixed(3));
+}
+function renderUnitPrice(d) {
+  const tb = $('tbody-unit');
+  if (!tb) return;
+  const rows = (d.models || []).filter(m => m.calls && m.credits > 0 && (m.p + m.k + m.c) > 0);
+  if (!rows.length) {
+    tb.__sig = null;
+    tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-3);padding:22px">该时间段暂无积分消耗</td></tr>';
+    $('unit-sub').textContent = '';
+    $('unit-note').textContent = '';
+    return;
+  }
+  // 指纹含积分/成本/tokens 与官方价：任一项变化都要重绘
+  const sig = JSON.stringify(rows.map(m => [m.m, m.credits, m.cost, m.p, m.k, m.c,
+    m.price && [m.price.hit, m.price.miss, m.price.out]]));
+  if (tb.__sig === sig) return;
+  tb.__sig = sig;
+
+  // 按总 tokens 降序，与「模型明细」默认顺序一致
+  const list = rows.slice().sort((a, b) => (b.p + b.k + b.c) - (a.p + a.k + a.c));
+  const split = list.filter(m => m.price && m.cost > 0).length;
+  tb.innerHTML = list.map(m => {
+    const mtokens = (m.p + m.k + m.c) / 1e6;
+    const blended = mtokens > 0 ? m.credits / mtokens : null;
+    const pr = m.price;
+    // 积分/¥ = 该模型实际消耗积分 ÷ 其等价 API 成本；再乘官方各档单价 → 每百万 tokens 所需积分
+    const beta = (pr && m.cost > 0) ? m.credits / m.cost : null;
+    const cell3 = v => (beta == null ? '<span class="unit-na">—</span>' : fmtCredUnit(v));
+    const api = pr
+      ? `${fmtApiPrice(pr.miss)} / ${fmtApiPrice(pr.hit)} / ${fmtApiPrice(pr.out)}`
+      : '<span class="unit-na">未定价</span>';
+    const rowTitle = beta != null
+      ? `按该模型实测：每 1 元官方价约消耗 ${beta.toFixed(2)} 积分`
+      : (pr
+        ? '该模型有官方价，但当前范围内没有可用的等价 API 成本，无法反推三档单价'
+        : '官方未公布该模型价格，无法按三档拆分，只给综合平均');
+    return `
+    <tr title="${rowTitle.replace(/"/g, '&quot;')}">
+      <td><span class="m-dot" style="background:${modelColor(m.m)}"></span>${m.m}${pr ? '' : ' <span class="tag approx">未定价</span>'}</td>
+      <td class="num">${cell3(beta == null ? null : beta * pr.miss)}</td>
+      <td class="num">${cell3(beta == null ? null : beta * pr.hit)}</td>
+      <td class="num">${cell3(beta == null ? null : beta * pr.out)}</td>
+      <td class="num">${fmtCredUnit(blended)}</td>
+      <td class="num">${api}</td>
+    </tr>`;
+  }).join('');
+
+  $('unit-sub').textContent = `单位：积分 / 百万 tokens · ${list.length} 个模型（${split} 个可拆分三档）`;
+  $('unit-note').innerHTML =
+    '积分单价 = 该模型实际消耗积分 ÷ 其等价 API 成本 × 官方对应档单价；DeepSeek 按闲时基价折算，高峰时段的 ×2 已反映在实测比例里。' +
+    '<br>「综合」= 总积分 ÷ 总 tokens，受各模型缓存命中比例影响，与三档单价不可互推；官方未公布价格的模型只给综合值。';
 }
 
 /* --- 最近请求 --- */
