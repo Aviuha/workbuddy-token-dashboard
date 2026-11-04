@@ -89,7 +89,7 @@ STATIC_DIR = os.path.join(BASE, 'static')
 CACHE_FILE = os.path.join(BASE, 'data', 'index-cache.json')
 LOG_CACHE_FILE = os.path.join(BASE, 'data', 'log-index-cache.json')
 PORT = 8899
-VERSION = '1.2.3'
+VERSION = '1.2.4'
 
 LOCAL_TZ = datetime.now().astimezone().tzinfo
 CN_TZ = timezone(timedelta(hours=8))          # 北京时间，用于峰谷判定
@@ -461,6 +461,16 @@ PRICING_DEFAULTS = {
         'hit': 0.3, 'miss': 6.0, 'out': 18.0, 'peak_x': 1.0, 'kind': 'official',
         'free_hours': (23, 8),      # 23:00-08:00 不计积分（API 价不受影响）
         'src': '腾讯云官方文档（混元 Hy4 preview；23:00-08:00 免费）',
+    },
+    'hy4': {
+        'hit': 0.3, 'miss': 6.0, 'out': 18.0, 'peak_x': 1.0, 'kind': 'official',
+        'src': '腾讯混元 Hy4 正式版发布价（2026-11-04，与 preview 定价相同）',
+    },
+    'hy4free': {
+        # Hy4 正式版的免费试用档（WorkBuddy 11-04 ~ 11-15 免费额度），调用不消耗积分；
+        # 等价 API 价按 Hy4 preview 同价推断（官方公告称正式版定价与 preview 相同：0.3 / 6 / 18）
+        'hit': 0.3, 'miss': 6.0, 'out': 18.0, 'peak_x': 1.0, 'kind': 'estimated',
+        'src': '按 Hy4 preview 同价推断（免费试用档，不消耗积分）',
     },
     'minimax-m3': {
         'hit': 0.42, 'miss': 2.1, 'out': 8.4, 'peak_x': 1.0, 'kind': 'official',
@@ -1313,9 +1323,11 @@ class CreditStore:
 
 BYOK_PREFIX = 'custom-local:'   # 自带 API Key 的模型（走用户自己的 API），调用不消耗 WorkBuddy 积分
 # 不消耗积分的模型（平台免费/预览期免费等；经调用级扣费日志核实：
-# step-5-preview 在 10-15 / 10-16 的全部调用（236 / 67 个）均无 credit consumed 记录）。
+# step-5-preview 在 10-15 / 10-16 的全部调用（236 / 67 个）均无 credit consumed 记录；
+# hy4free 为 Hy4 正式版的免费试用档（11-04 ~ 11-15），370 笔调用（283 笔有 rid）
+# 均无扣费记录，对照 hy4-preview 同期有明确扣费）。
 # 与 BYOK 同处理：不参与积分归属，避免积分被误归到它们头上。
-FREE_MODELS = {'step-5-preview'}
+FREE_MODELS = {'step-5-preview', 'hy4free'}
 
 
 def is_byok(model):
