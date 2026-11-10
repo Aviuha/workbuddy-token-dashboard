@@ -89,7 +89,7 @@ STATIC_DIR = os.path.join(BASE, 'static')
 CACHE_FILE = os.path.join(BASE, 'data', 'index-cache.json')
 LOG_CACHE_FILE = os.path.join(BASE, 'data', 'log-index-cache.json')
 PORT = 8899
-VERSION = '1.2.4'
+VERSION = '1.2.5'
 
 LOCAL_TZ = datetime.now().astimezone().tzinfo
 CN_TZ = timezone(timedelta(hours=8))          # 北京时间，用于峰谷判定
@@ -449,6 +449,10 @@ PRICING_DEFAULTS = {
         'hit': 0.23, 'miss': 0.8, 'out': 2.8, 'peak_x': 1.0, 'kind': 'official',
         'src': '智谱开放平台（bigmodel.cn）',
     },
+    'glm-5.3-flashx': {
+        'hit': 0.57, 'miss': 2.0, 'out': 7.0, 'peak_x': 1.0, 'kind': 'official',
+        'src': '智谱开放平台（GLM-5.3-FlashX）',
+    },
     'glm-5.2': {
         'hit': 2.0, 'miss': 8.0, 'out': 28.0, 'peak_x': 1.0, 'kind': 'official',
         'src': '智谱开放平台（bigmodel.cn）',
@@ -464,7 +468,7 @@ PRICING_DEFAULTS = {
     },
     'hy4': {
         'hit': 0.3, 'miss': 6.0, 'out': 18.0, 'peak_x': 1.0, 'kind': 'official',
-        'src': '腾讯混元 Hy4 正式版发布价（2026-11-04，与 preview 定价相同）',
+        'src': '腾讯混元 Hy4 正式版发布价（2026-11-04，与 preview 定价相同；腾讯云 TokenHub 至 2026-12-31 按刊例价 5 折）',
     },
     'hy4free': {
         # Hy4 正式版的免费试用档（WorkBuddy 11-04 ~ 11-15 免费额度），调用不消耗积分；
@@ -475,6 +479,10 @@ PRICING_DEFAULTS = {
     'minimax-m3': {
         'hit': 0.42, 'miss': 2.1, 'out': 8.4, 'peak_x': 1.0, 'kind': 'official',
         'src': 'MiniMax 官方（标准价永久五折后）',
+    },
+    'minimax-m3.1-flash': {
+        'hit': 0.1, 'miss': 1.0, 'out': 4.0, 'peak_x': 1.0, 'kind': 'official',
+        'src': 'MiniMax 官方（M3.1 Flash：输入 1 元 / 输出 4 元，缓存读按输入 1 折）',
     },
     'step-5-preview': {
         'hit': 0.7, 'miss': 7.0, 'out': 20.0, 'peak_x': 1.0, 'kind': 'official',
